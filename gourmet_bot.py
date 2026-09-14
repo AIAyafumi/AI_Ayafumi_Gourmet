@@ -1,6 +1,8 @@
 import os
 import time
 import json
+import re
+import unicodedata
 import requests
 
 from flask import Flask, request, jsonify
@@ -12,6 +14,7 @@ from linebot.v3.messaging import (
     Configuration,
     MessagingApi,
     ReplyMessageRequest,
+    PushMessageRequest,
     TextMessage,
     QuickReply,
     QuickReplyItem,
@@ -30,7 +33,6 @@ load_dotenv()
 GOURMET_LINE_CHANNEL_ACCESS_TOKEN = os.getenv(
     "GOURMET_LINE_CHANNEL_ACCESS_TOKEN"
 )
-
 GOURMET_LINE_CHANNEL_SECRET = os.getenv(
     "GOURMET_LINE_CHANNEL_SECRET"
 )
@@ -38,12 +40,14 @@ GOURMET_LINE_CHANNEL_SECRET = os.getenv(
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 HOTPEPPER_API_KEY = os.getenv("HOTPEPPER_API_KEY")
+YAHOO_CLIENT_ID = os.getenv("YAHOO_CLIENT_ID")
 
 
 # =========================================================
-# API URL
+# URL
 # =========================================================
 
 GEMINI_URL = (
@@ -62,18 +66,16 @@ HOTPEPPER_URL = (
     "hotpepper/gourmet/v1/"
 )
 
-
-# =========================================================
-# LINE設定
-# =========================================================
-
-line_configuration = Configuration(
-    access_token=GOURMET_LINE_CHANNEL_ACCESS_TOKEN
+YAHOO_LOCAL_SEARCH_URL = (
+    "https://map.yahooapis.jp/search/local/V1/localSearch"
 )
 
-line_parser = WebhookParser(
-    GOURMET_LINE_CHANNEL_SECRET
-)
+
+# =========================================================
+# Yahoo!設定
+# =========================================================
+
+YAHOO_SEARCH_DISTANCE_METERS = 1500
 
 
 # =========================================================
@@ -84,14 +86,17 @@ app = Flask(__name__)
 
 
 # =========================================================
-# プロンプト
+# LINE設定
 # =========================================================
 
-SYSTEM_PROMPT_FILE = os.path.join(
-    os.path.dirname(__file__),
-    "prompts",
-    "gourmet_system_prompt.txt"
+line_configuration = Configuration(
+    access_token=GOURMET_LINE_CHANNEL_ACCESS_TOKEN
 )
+
+line_api_client = ApiClient(line_configuration)
+line_messaging_api = MessagingApi(line_api_client)
+
+line_parser = WebhookParser(GOURMET_LINE_CHANNEL_SECRET)
 
 
 # =========================================================
@@ -100,187 +105,14 @@ SYSTEM_PROMPT_FILE = os.path.join(
 
 conversation_histories = {}
 
-MAX_HISTORY_MESSAGES = 20
-
-
-def load_gourmet_system_prompt():
-    try:
-        with open(
-            SYSTEM_PROMPT_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
-            return f.read()
-
-    except Exception as e:
-        print("システムプロンプト読み込みエラー：", e)
-
-        return """
-あなたはAIアヤフミのレストラン検索AIです。
-
-ユーザーの希望条件をもとに、実在する飲食店を探してください。
-
-店舗情報は推測で作らないでください。
-検索結果にない店舗を勝手に作らないでください。
-営業時間や閉店情報が確認できる場合は、それを考慮してください。
-"""
-
-
-def get_conversation_history(user_id):
-    return conversation_histories.get(user_id, [])
-
-
-def add_conversation_message(user_id, role, content):
-
-    if user_id not in conversation_histories:
-        conversation_histories[user_id] = []
-
-    conversation_histories[user_id].append({
-        "role": role,
-        "content": content
-    })
-
-    conversation_histories[user_id] = (
-        conversation_histories[user_id][-MAX_HISTORY_MESSAGES:]
-    )
+MAX_HISTORY = 10
 
 
 # =========================================================
-# HTTPリトライ
+# レストラン検索ステート
 # =========================================================
 
-def post_with_retry(
-    url,
-    headers=None,
-    json_data=None,
-    params=None,
-    timeout=30,
-    retries=3
-):
-
-    last_error = None
-
-    for attempt in range(retries):
-
-        try:
-
-            response = requests.post(
-                url,
-                headers=headers,
-                json=json_data,
-                params=params,
-                timeout=timeout
-            )
-
-            return response
-
-        except Exception as e:
-
-            last_error = e
-
-            print(
-                f"HTTPエラー attempt={attempt + 1}/{retries}:",
-                e
-            )
-
-            if attempt < retries - 1:
-                time.sleep(2)
-
-    raise last_error
-
-
-# =========================================================
-# LINE Quick Reply
-# =========================================================
-
-def make_quick_reply(items):
-
-    quick_reply_items = []
-
-    for item in items:
-
-        quick_reply_items.append(
-            QuickReplyItem(
-                action=MessageAction(
-                    label=item,
-                    text=item
-                )
-            )
-        )
-
-    return QuickReply(
-        items=quick_reply_items
-    )
-
-
-def reply_to_line(
-    reply_token,
-    text,
-    quick_reply_items=None
-):
-
-    with ApiClient(line_configuration) as api_client:
-
-        messaging_api = MessagingApi(api_client)
-
-        if quick_reply_items:
-
-            message = TextMessage(
-                text=text,
-                quick_reply=make_quick_reply(
-                    quick_reply_items
-                )
-            )
-
-        else:
-
-            message = TextMessage(
-                text=text
-            )
-
-        messaging_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=reply_token,
-                messages=[message]
-            )
-        )
-
-
-# =========================================================
-# LINE 選択状態
-# =========================================================
-
-gourmet_search_states = {}
-
-
-def create_new_search_state():
-
-    return {
-        "step": "location",
-        "location": None,
-        "genre": None,
-        "people": None,
-        "budget": None,
-        "time": None,
-    }
-
-
-def start_gourmet_search(user_id):
-
-    gourmet_search_states[user_id] = (
-        create_new_search_state()
-    )
-
-
-def get_gourmet_search_state(user_id):
-
-    if user_id not in gourmet_search_states:
-
-        gourmet_search_states[user_id] = (
-            create_new_search_state()
-        )
-
-    return gourmet_search_states[user_id]
+search_states = {}
 
 
 # =========================================================
@@ -300,6 +132,11 @@ GENRE_OPTIONS = [
     "寿司",
     "居酒屋",
     "イタリアン",
+    "カフェ",
+    "中華",
+    "和食",
+    "韓国料理",
+    "ファミレス",
     "その他",
 ]
 
@@ -313,99 +150,215 @@ PEOPLE_OPTIONS = [
 
 BUDGET_OPTIONS = [
     "～1,000円",
-    "1,000～1,500円",
-    "1,500～2,000円",
-    "2,000～3,000円",
-    "3,000円～",
+    "～2,000円",
+    "～3,000円",
+    "～5,000円",
+    "5,000円～",
 ]
 
 TIME_OPTIONS = [
-    "今から",
     "昼",
     "夜",
+    "いつでも",
 ]
 
 
 # =========================================================
-# LINE選択画面
+# 共通ユーティリティ
 # =========================================================
 
-def send_location_selection(reply_token):
+def safe_json(response):
+    try:
+        return response.json()
+    except Exception:
+        return {}
 
-    reply_to_line(
-        reply_token,
-        "📍 お店を探す場所を選んでください。",
-        LOCATION_OPTIONS
+
+def normalize_text(text):
+    if not text:
+        return ""
+
+    return (
+        str(text)
+        .strip()
+        .replace("　", " ")
+        .replace("\n", " ")
     )
 
 
-def send_genre_selection(reply_token):
+def normalize_for_duplicate(text):
+    """
+    重複判定専用の文字列正規化。
 
-    reply_to_line(
-        reply_token,
-        "🍴 ジャンルを選んでください。",
-        GENRE_OPTIONS
+    以下を吸収する。
+    - 全角/半角
+    - 大文字/小文字
+    - 空白
+    - ハイフン類
+    - 句読点
+    """
+
+    if not text:
+        return ""
+
+    text = unicodedata.normalize(
+        "NFKC",
+        str(text),
     )
 
+    text = text.lower()
 
-def send_people_selection(reply_token):
-
-    reply_to_line(
-        reply_token,
-        "👤 利用人数を選んでください。",
-        PEOPLE_OPTIONS
-    )
-
-
-def send_budget_selection(reply_token):
-
-    reply_to_line(
-        reply_token,
-        "💰 予算を選んでください。",
-        BUDGET_OPTIONS
-    )
-
-
-def send_time_selection(reply_token):
-
-    reply_to_line(
-        reply_token,
-        "⏰ 利用する時間を選んでください。",
-        TIME_OPTIONS
-    )
-
-
-def send_confirmation(
-    reply_token,
-    state
-):
-
-    text = (
-        "🔎 検索条件を確認してください。\n\n"
-        f"📍 場所：{state['location']}\n"
-        f"🍴 ジャンル：{state['genre']}\n"
-        f"👤 人数：{state['people']}\n"
-        f"💰 予算：{state['budget']}\n"
-        f"⏰ 時間：{state['time']}\n\n"
-        "この条件でお店を探しますか？"
-    )
-
-    reply_to_line(
-        reply_token,
+    text = re.sub(
+        r"\s+",
+        "",
         text,
-        [
-            "この条件で検索",
-            "最初から"
-        ]
+    )
+
+    text = re.sub(
+        r"[-‐-‒–—−ーｰ]",
+        "-",
+        text,
+    )
+
+    text = re.sub(
+        r"[、，,。．.]",
+        "",
+        text,
+    )
+
+    return text
+
+
+def add_conversation_history(
+    user_id,
+    role,
+    content,
+):
+    if user_id not in conversation_histories:
+        conversation_histories[user_id] = []
+
+    conversation_histories[user_id].append({
+        "role": role,
+        "content": content,
+    })
+
+    if len(conversation_histories[user_id]) > MAX_HISTORY:
+        conversation_histories[user_id] = (
+            conversation_histories[user_id][-MAX_HISTORY:]
+        )
+
+
+def get_conversation_history(user_id):
+    return conversation_histories.get(
+        user_id,
+        [],
     )
 
 
 # =========================================================
-# Hot Pepper検索判定
+# LINE返信
+# =========================================================
+
+def reply_text(
+    reply_token,
+    text,
+    quick_reply=None,
+):
+    message = TextMessage(
+        text=text,
+        quick_reply=quick_reply,
+    )
+
+    request_body = ReplyMessageRequest(
+        reply_token=reply_token,
+        messages=[message],
+    )
+
+    line_messaging_api.reply_message(
+        request_body
+    )
+
+
+def push_text(
+    user_id,
+    text,
+):
+    """
+    ReplyToken使用後に追加回答を送るためのPush Message。
+    """
+
+    message = TextMessage(
+        text=text
+    )
+
+    request_body = PushMessageRequest(
+        to=user_id,
+        messages=[message],
+    )
+
+    line_messaging_api.push_message(
+        request_body
+    )
+
+
+def build_quick_reply(options):
+    items = []
+
+    for option in options:
+        items.append(
+            QuickReplyItem(
+                action=MessageAction(
+                    label=option,
+                    text=option,
+                )
+            )
+        )
+
+    return QuickReply(
+        items=items
+    )
+
+
+# =========================================================
+# 検索ステート
+# =========================================================
+
+def get_search_state(user_id):
+    if user_id not in search_states:
+        search_states[user_id] = {
+            "step": "location",
+            "location": "",
+            "genre": "",
+            "people": "",
+            "budget": "",
+            "time": "",
+        }
+
+    return search_states[user_id]
+
+
+def reset_search_state(user_id):
+    search_states.pop(
+        user_id,
+        None,
+    )
+
+
+def build_confirmation_text(state):
+    return (
+        f"{state['location']}で"
+        f"{state['genre']}を探す。"
+        f"予算は{state['budget']}。"
+        f"{state['people']}で利用。"
+        f"利用時間は{state['time']}。"
+    )
+
+
+# =========================================================
+# Hot Pepper
 # =========================================================
 
 def should_search_hotpepper(user_text):
-
     keywords = [
         "店",
         "お店",
@@ -424,7 +377,17 @@ def should_search_hotpepper(user_text):
         "探して",
         "検索",
         "おすすめ",
+        "開始",
     ]
+
+    # 「開始」は検索フロー開始
+    if user_text == "開始":
+        return True
+
+    # 駅名を直接入力した場合も検索フロー開始
+    for option in LOCATION_OPTIONS:
+        if option in user_text:
+            return True
 
     return any(
         keyword in user_text
@@ -432,159 +395,44 @@ def should_search_hotpepper(user_text):
     )
 
 
-# =========================================================
-# Hot Pepper検索用キーワード抽出
-# =========================================================
-
 def build_hotpepper_keyword(user_text):
-
-    """
-    LINEの選択条件から、
-    Hot Pepper検索に必要な「場所＋ジャンル」だけを抽出する。
-
-    例：
-
-    京王堀之内駅でラーメンを探す。
-    予算は～1,000円。
-    1人で利用。
-    利用時間は今から。
-
-    ↓
-
-    京王堀之内駅 ラーメン
-    """
+    parts = []
 
     location = ""
-    genre = ""
 
-    # -----------------------------------------------------
-    # 選択式フローから作られた文章
-    # -----------------------------------------------------
-
-    if "で" in user_text and "を探す" in user_text:
-
-        try:
-
-            before = user_text.split("で", 1)[0].strip()
-
-            if before:
-                location = before
-
-        except Exception:
-            pass
-
-    # -----------------------------------------------------
-    # ジャンル
-    # -----------------------------------------------------
-
-    genres = [
-        "ラーメン",
-        "焼肉",
-        "寿司",
-        "居酒屋",
-        "イタリアン",
-        "カフェ",
-        "バー",
-        "中華",
-        "焼き鳥",
-        "韓国料理",
-        "しゃぶしゃぶ",
-        "うどん",
-        "そば",
-    ]
-
-    for g in genres:
-
-        if g in user_text:
-
-            genre = g
+    for option in LOCATION_OPTIONS:
+        if option in user_text:
+            location = option
             break
 
-    # -----------------------------------------------------
-    # structured selection fallback
-    # -----------------------------------------------------
+    genre = ""
 
-    if not location:
+    for option in GENRE_OPTIONS:
+        if option in user_text:
+            genre = option
+            break
 
-        for candidate in LOCATION_OPTIONS:
+    if location:
+        parts.append(location)
 
-            if candidate in user_text:
+    if genre and genre != "その他":
+        parts.append(genre)
 
-                location = candidate
-                break
+    if not parts:
+        return user_text
 
-    # -----------------------------------------------------
-    # location + genre
-    # -----------------------------------------------------
+    return " ".join(parts)
 
-    if location and genre:
-
-        keyword = f"{location} {genre}"
-
-    elif location:
-
-        keyword = location
-
-    elif genre:
-
-        keyword = genre
-
-    else:
-
-        # 従来の自然言語検索用 fallback
-        keyword = user_text
-
-        remove_words = [
-            "で",
-            "を探して",
-            "を探す",
-            "探して",
-            "検索して",
-            "おすすめ",
-            "お店",
-            "店舗",
-            "レストラン",
-            "予算",
-            "人数",
-            "利用時間",
-            "今から",
-            "昼",
-            "夜",
-        ]
-
-        for word in remove_words:
-
-            keyword = keyword.replace(
-                word,
-                " "
-            )
-
-    keyword = " ".join(
-        keyword.split()
-    ).strip()
-
-    return keyword
-
-
-# =========================================================
-# Hot Pepper検索
-# =========================================================
 
 def search_hotpepper(user_text):
-
     if not HOTPEPPER_API_KEY:
-
-        print("HOTPEPPER_API_KEYが設定されていません")
-
+        print(
+            "HOTPEPPER_API_KEYが設定されていません。"
+        )
         return []
 
     keyword = build_hotpepper_keyword(
         user_text
-    )
-
-    print(
-        "Hot Pepper検索キーワード：",
-        keyword
     )
 
     params = {
@@ -596,501 +444,284 @@ def search_hotpepper(user_text):
     }
 
     try:
-
         response = requests.get(
             HOTPEPPER_URL,
             params=params,
-            timeout=30
+            timeout=20,
         )
 
-        print(
-            "Hot Pepper HTTPステータス：",
-            response.status_code
-        )
-
-        if response.status_code != 200:
-
-            print(
-                "Hot Pepperエラー：",
-                response.text[:1000]
-            )
-
-            return []
+        response.raise_for_status()
 
         data = response.json()
 
-        results = (
-            data
-            .get("results", {})
-            .get("shop", [])
-        )
-
-        print(
-            "Hot Pepper検索件数：",
-            len(results)
-        )
-
-        candidates = []
-
-        for shop in results:
-
-            budget = shop.get(
-                "budget",
-                {}
-            )
-
-            genre = shop.get(
-                "genre",
-                {}
-            )
-
-            station = ""
-
-            station_data = shop.get(
-                "station",
-                []
-            )
-
-            if station_data:
-
-                try:
-
-                    station = station_data[0].get(
-                        "name",
-                        ""
-                    )
-
-                except Exception:
-                    station = ""
-
-            candidate = {
-
-                "name": shop.get(
-                    "name",
-                    ""
-                ),
-
-                "genre": genre.get(
-                    "name",
-                    ""
-                ),
-
-                "address": shop.get(
-                    "address",
-                    ""
-                ),
-
-                "station": station,
-
-                "budget_average": budget.get(
-                    "average",
-                    ""
-                ),
-
-                "lunch": budget.get(
-                    "lunch",
-                    ""
-                ),
-
-                "url": shop.get(
-                    "urls",
-                    {}
-                ).get(
-                    "pc",
-                    ""
-                ),
-            }
-
-            candidates.append(
-                candidate
-            )
-
-        print(
-            "Hot Pepper取得件数：",
-            len(candidates)
-        )
-
-        # -------------------------------------------------
-        # Tavilyで店舗ごとの営業状況確認
-        # -------------------------------------------------
-
-        candidates = verify_hotpepper_shops_with_tavily(
-            candidates
-        )
-
-        return candidates
-
     except Exception as e:
-
         print(
-            "Hot Pepper検索エラー：",
-            e
+            "Hot Pepper APIエラー:",
+            e,
         )
-
         return []
 
+    results = []
 
-# =========================================================
-# Hot Pepper候補フォーマット
-# =========================================================
+    shops = (
+        data.get("results", {})
+        .get("shop", [])
+    )
 
-def format_hotpepper_results(candidates):
+    if isinstance(shops, dict):
+        shops = [shops]
 
-    if not candidates:
+    for shop in shops:
+        results.append({
+            "name": shop.get(
+                "name",
+                "",
+            ),
+            "genre": (
+                shop.get("genre", {})
+                .get("name", "")
+            ),
+            "address": shop.get(
+                "address",
+                "",
+            ),
+            "station": shop.get(
+                "station_name",
+                "",
+            ),
+            "budget": (
+                shop.get("budget", {})
+                .get("name", "")
+            ),
+            "open": shop.get(
+                "open",
+                "",
+            ),
+            "close": shop.get(
+                "close",
+                "",
+            ),
+            "url": (
+                shop.get("urls", {})
+                .get("pc", "")
+            ),
+            "tel": shop.get(
+                "tel",
+                "",
+            ),
+            "lat": shop.get(
+                "lat",
+                "",
+            ),
+            "lng": shop.get(
+                "lng",
+                "",
+            ),
+            "source": "Hot Pepper",
+        })
 
-        return "Hot Pepperから該当店舗は見つかりませんでした。"
+    results = verify_hotpepper_shops_with_tavily(
+        results
+    )
 
-    lines = []
-
-    for index, shop in enumerate(
-        candidates,
-        start=1
-    ):
-
-        lines.append(
-            f"{index}. {shop.get('name', '')}"
-        )
-
-        lines.append(
-            f"   ジャンル：{shop.get('genre', '')}"
-        )
-
-        lines.append(
-            f"   住所：{shop.get('address', '')}"
-        )
-
-        if shop.get("station"):
-
-            lines.append(
-                f"   最寄駅：{shop.get('station')}"
-            )
-
-        if shop.get("budget_average"):
-
-            lines.append(
-                f"   予算：{shop.get('budget_average')}"
-            )
-
-        if shop.get("lunch"):
-
-            lines.append(
-                f"   ランチ：{shop.get('lunch')}"
-            )
-
-        lines.append(
-            f"   Hot Pepper：{shop.get('url', '')}"
-        )
-
-        if shop.get("tavily_status"):
-
-            lines.append(
-                f"   営業確認：{shop.get('tavily_status')}"
-            )
-
-        if shop.get("tavily_reason"):
-
-            lines.append(
-                f"   確認内容：{shop.get('tavily_reason')}"
-            )
-
-        lines.append("")
-
-    return "\n".join(lines)
+    return results
 
 
 # =========================================================
 # Tavily
 # =========================================================
 
-def search_tavily(query):
-
+def search_tavily(
+    query,
+    max_results=5,
+):
     if not TAVILY_API_KEY:
-
         print(
-            "TAVILY_API_KEYが設定されていません"
+            "TAVILY_API_KEYが設定されていません。"
         )
-
         return []
-
-    print(
-        "Tavily検索開始：",
-        query
-    )
 
     payload = {
         "api_key": TAVILY_API_KEY,
         "query": query,
-        "search_depth": "advanced",
-        "max_results": 5,
+        "search_depth": "basic",
+        "max_results": max_results,
         "include_answer": False,
         "include_raw_content": False,
     }
 
     try:
-
         response = requests.post(
             TAVILY_URL,
             json=payload,
-            timeout=30
+            timeout=20,
         )
 
-        print(
-            "Tavily HTTPステータス：",
-            response.status_code
-        )
-
-        if response.status_code != 200:
-
-            print(
-                "Tavilyエラー：",
-                response.text[:1000]
-            )
-
-            return []
+        response.raise_for_status()
 
         data = response.json()
 
-        results = data.get(
-            "results",
-            []
-        )
-
-        print(
-            "Tavily検索件数：",
-            len(results)
-        )
-
-        return results
-
     except Exception as e:
-
         print(
-            "Tavily検索エラー：",
-            e
+            "Tavily APIエラー:",
+            e,
         )
-
         return []
 
-
-# =========================================================
-# Hot Pepper店舗をTavilyで営業確認
-# =========================================================
-
-def check_hotpepper_shop_with_tavily(shop):
-
-    shop_name = shop.get(
-        "name",
-        ""
+    return data.get(
+        "results",
+        [],
     )
 
-    if not shop_name:
 
-        return (
-            "unknown",
-            "店舗名が取得できませんでした"
-        )
+def check_hotpepper_shop_with_tavily(shop):
+    name = shop.get(
+        "name",
+        "",
+    )
+
+    address = shop.get(
+        "address",
+        "",
+    )
+
+    if not name:
+        return {
+            "status": "unknown",
+            "reason": "",
+        }
 
     query = (
-        f'"{shop_name}" '
+        f'"{name}" '
+        f"{address} "
         "営業時間 営業中 閉店 移転 最新情報"
     )
 
     results = search_tavily(
-        query
+        query,
+        max_results=5,
     )
 
     if not results:
+        return {
+            "status": "unknown",
+            "reason": "",
+        }
 
-        return (
-            "unknown",
-            "Tavilyで確認情報を取得できませんでした"
-        )
-
-    closed_score = 0
-    open_score = 0
-
-    evidence = []
-
-    closed_keywords = [
-        "閉店",
-        "営業終了",
-        "閉業",
-        "廃業",
-        "閉鎖",
-        "移転",
-        "営業していない",
-    ]
-
-    open_keywords = [
-        "営業中",
-        "営業しています",
-        "営業",
-        "営業時間",
-        "営業再開",
-        "営業開始",
-    ]
+    text_parts = []
 
     for result in results:
-
         title = result.get(
             "title",
-            ""
+            "",
         )
 
         content = result.get(
             "content",
-            ""
+            "",
         )
 
-        text = (
+        text_parts.append(
             f"{title} {content}"
         )
 
-        for keyword in closed_keywords:
-
-            if keyword in text:
-
-                closed_score += 1
-
-                evidence.append(
-                    f"閉店系：{keyword}"
-                )
-
-        for keyword in open_keywords:
-
-            if keyword in text:
-
-                open_score += 1
-
-                evidence.append(
-                    f"営業系：{keyword}"
-                )
-
-    reason = " / ".join(
-        evidence[:5]
+    combined = " ".join(
+        text_parts
     )
 
-    if (
-        closed_score >= 3
-        and closed_score > open_score
+    closed_keywords = [
+        "閉店",
+        "閉業",
+        "営業終了",
+        "店舗終了",
+        "閉店しました",
+        "閉店のお知らせ",
+        "移転",
+    ]
+
+    if any(
+        keyword in combined
+        for keyword in closed_keywords
     ):
+        return {
+            "status": "closed",
+            "reason": combined[:500],
+        }
 
-        return (
-            "closed",
-            reason or "閉店情報が複数確認されました"
-        )
+    open_keywords = [
+        "営業中",
+        "営業しています",
+        "営業しております",
+        "営業時間",
+        "オープン",
+        "営業",
+    ]
 
-    if open_score > 0:
+    if any(
+        keyword in combined
+        for keyword in open_keywords
+    ):
+        return {
+            "status": "open",
+            "reason": combined[:500],
+        }
 
-        return (
-            "open",
-            reason or "営業情報を確認しました"
-        )
-
-    return (
-        "unknown",
-        reason or "営業状況を確定できませんでした"
-    )
+    return {
+        "status": "unknown",
+        "reason": combined[:500],
+    }
 
 
 def verify_hotpepper_shops_with_tavily(
-    candidates
+    shops,
 ):
-
-    if not candidates:
-
-        print(
-            "Hot Pepper店舗候補なし"
-        )
-
-        return []
-
     verified = []
 
-    for shop in candidates:
-
-        name = shop.get(
-            "name",
-            ""
-        )
-
-        print(
-            "----------------------------------------"
-        )
-
-        print(
-            "Tavily店舗確認：",
-            name
-        )
-
-        status, reason = (
+    for shop in shops:
+        verification = (
             check_hotpepper_shop_with_tavily(
                 shop
             )
         )
 
-        shop["tavily_status"] = status
-        shop["tavily_reason"] = reason
-
-        print(
-            "Tavily判定：",
-            status
+        status = verification.get(
+            "status",
+            "unknown",
         )
 
-        print(
-            "Tavily理由：",
-            reason
+        reason = verification.get(
+            "reason",
+            "",
         )
 
         if status == "closed":
-
             print(
-                "閉店店舗として除外：",
-                name
+                f"Tavily判定で除外: "
+                f"{shop.get('name', '')}"
             )
-
             continue
 
-        verified.append(
-            shop
-        )
+        shop["tavily_status"] = status
+        shop["tavily_reason"] = reason
 
-    for index, shop in enumerate(
-        verified,
-        start=1
-    ):
+        verified.append(shop)
 
-        shop["number"] = index
-
-    print(
-        "Tavily確認後の店舗数：",
-        len(verified)
-    )
+        time.sleep(0.2)
 
     return verified
 
 
-# =========================================================
-# Tavily一般検索
-# =========================================================
-
 def should_search_tavily(user_text):
-
     keywords = [
-        "最新",
         "営業",
+        "開いてる",
+        "開いている",
+        "閉まってる",
         "閉店",
-        "営業時間",
+        "営業中",
+        "最新",
         "今",
-        "現在",
-        "おすすめ",
-        "店",
-        "お店",
-        "レストラン",
-        "ラーメン",
-        "焼肉",
-        "寿司",
-        "居酒屋",
+        "今日",
     ]
 
     return any(
@@ -1099,48 +730,753 @@ def should_search_tavily(user_text):
     )
 
 
-def format_tavily_results(results):
-
-    if not results:
-
+def get_tavily_context(user_text):
+    if not should_search_tavily(
+        user_text
+    ):
         return ""
 
-    lines = []
+    results = search_tavily(
+        user_text,
+        max_results=5,
+    )
 
-    for index, result in enumerate(
-        results,
-        start=1
-    ):
+    if not results:
+        return ""
 
+    context_parts = []
+
+    for result in results:
         title = result.get(
             "title",
-            ""
+            "",
         )
 
         content = result.get(
             "content",
-            ""
+            "",
         )
 
         url = result.get(
             "url",
-            ""
+            "",
         )
 
-        lines.append(
-            f"{index}. {title}"
+        context_parts.append(
+            f"タイトル: {title}\n"
+            f"内容: {content}\n"
+            f"URL: {url}"
         )
 
-        if content:
+    return "\n\n".join(
+        context_parts
+    )
 
-            lines.append(
-                f"   {content[:500]}"
+
+# =========================================================
+# Yahoo!ローカルサーチ
+# =========================================================
+
+def build_yahoo_local_keyword(user_text):
+    location = ""
+
+    for option in LOCATION_OPTIONS:
+        if option in user_text:
+            location = option
+            break
+
+    genre = ""
+
+    for option in GENRE_OPTIONS:
+        if option in user_text:
+            genre = option
+            break
+
+    if genre:
+        return genre
+
+    if location:
+        return ""
+
+    search_terms = [
+        "お店",
+        "店",
+        "飲食店",
+        "レストラン",
+        "探して",
+        "検索",
+        "おすすめ",
+    ]
+
+    keyword = user_text
+
+    for term in search_terms:
+        keyword = keyword.replace(
+            term,
+            "",
+        )
+
+    return keyword.strip()
+
+
+def parse_yahoo_features(data):
+    features = data.get(
+        "Feature",
+        [],
+    )
+
+    if isinstance(features, dict):
+        features = [features]
+
+    candidates = []
+
+    for feature in features:
+        name = feature.get(
+            "Name",
+            "",
+        )
+
+        property_data = feature.get(
+            "Property",
+            {},
+        ) or {}
+
+        if isinstance(property_data, list):
+            property_data = (
+                property_data[0]
+                if property_data
+                else {}
             )
 
-        if url:
+        address = property_data.get(
+            "Address",
+            "",
+        )
 
+        tel = property_data.get(
+            "Tel1",
+            "",
+        )
+
+        detail = property_data.get(
+            "Detail",
+            {},
+        ) or {}
+
+        pc_url = detail.get(
+            "PcUrl1",
+            "",
+        )
+
+        genre_data = property_data.get(
+            "Genre",
+            [],
+        )
+
+        if isinstance(
+            genre_data,
+            dict,
+        ):
+            genre_data = [genre_data]
+
+        genre_names = []
+
+        for genre in genre_data:
+            if isinstance(
+                genre,
+                dict,
+            ):
+                genre_name = genre.get(
+                    "Name",
+                    "",
+                )
+            else:
+                genre_name = str(
+                    genre
+                )
+
+            if genre_name:
+                genre_names.append(
+                    genre_name
+                )
+
+        station_data = property_data.get(
+            "Station",
+            [],
+        )
+
+        if isinstance(
+            station_data,
+            dict,
+        ):
+            station_data = [
+                station_data
+            ]
+
+        station_names = []
+
+        for station in station_data:
+            if isinstance(
+                station,
+                dict,
+            ):
+                station_name = station.get(
+                    "Name",
+                    "",
+                )
+            else:
+                station_name = str(
+                    station
+                )
+
+            if station_name:
+                station_names.append(
+                    station_name
+                )
+
+        geometry = feature.get(
+            "Geometry",
+            {},
+        ) or {}
+
+        coordinates = geometry.get(
+            "Coordinates",
+            "",
+        )
+
+        distance_value = feature.get(
+            "Distance",
+            "",
+        )
+
+        candidates.append({
+            "name": name,
+            "genre": ", ".join(
+                genre_names
+            ),
+            "address": address,
+            "station": ", ".join(
+                station_names
+            ),
+            "tel": tel,
+            "url": pc_url,
+            "coordinates": coordinates,
+            "distance": distance_value,
+            "source": "Yahoo!ローカルサーチ",
+        })
+
+    return candidates
+
+
+# =========================================================
+# Yahoo!重複除去
+# =========================================================
+
+def deduplicate_yahoo_results(
+    candidates,
+):
+    """
+    Yahoo!ローカル検索結果の重複を除去する。
+    """
+
+    unique = []
+
+    seen_name_address = set()
+    seen_name_coordinates = set()
+    seen_name_only = set()
+    seen_coordinates = set()
+
+    for candidate in candidates:
+
+        name = normalize_for_duplicate(
+            candidate.get(
+                "name",
+                "",
+            )
+        )
+
+        address = normalize_for_duplicate(
+            candidate.get(
+                "address",
+                "",
+            )
+        )
+
+        coordinates = normalize_for_duplicate(
+            candidate.get(
+                "coordinates",
+                "",
+            )
+        )
+
+        if name and address:
+
+            key = (
+                name,
+                address,
+            )
+
+            if key in seen_name_address:
+                print(
+                    "Yahoo!重複除外:",
+                    candidate.get(
+                        "name",
+                        "",
+                    ),
+                    candidate.get(
+                        "address",
+                        "",
+                    ),
+                )
+                continue
+
+            seen_name_address.add(key)
+
+        elif name and coordinates:
+
+            key = (
+                name,
+                coordinates,
+            )
+
+            if key in seen_name_coordinates:
+                print(
+                    "Yahoo!重複除外:",
+                    candidate.get(
+                        "name",
+                        "",
+                    ),
+                )
+                continue
+
+            seen_name_coordinates.add(key)
+
+        elif name:
+
+            if name in seen_name_only:
+                print(
+                    "Yahoo!重複除外:",
+                    candidate.get(
+                        "name",
+                        "",
+                    ),
+                )
+                continue
+
+            seen_name_only.add(name)
+
+        elif coordinates:
+
+            if coordinates in seen_coordinates:
+                print(
+                    "Yahoo!重複除外:",
+                    candidate.get(
+                        "name",
+                        "",
+                    ),
+                )
+                continue
+
+            seen_coordinates.add(
+                coordinates
+            )
+
+        else:
+            continue
+
+        unique.append(candidate)
+
+    print(
+        f"Yahoo!重複除去: "
+        f"{len(candidates)}件 → "
+        f"{len(unique)}件"
+    )
+
+    return unique
+
+
+def search_yahoo_local_by_coordinates(
+    latitude,
+    longitude,
+    query="",
+    distance=YAHOO_SEARCH_DISTANCE_METERS,
+):
+    if not YAHOO_CLIENT_ID:
+        print(
+            "YAHOO_CLIENT_IDが設定されていません。"
+        )
+        return []
+
+    params = {
+        "appid": YAHOO_CLIENT_ID,
+        "lat": latitude,
+        "lon": longitude,
+        "dist": distance,
+        "results": 10,
+        "sort": "geo",
+        "detail": "standard",
+        "output": "json",
+    }
+
+    if query:
+        params["query"] = query
+
+    try:
+        response = requests.get(
+            YAHOO_LOCAL_SEARCH_URL,
+            params=params,
+            timeout=20,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+    except Exception as e:
+        print(
+            "Yahoo!座標検索エラー:",
+            e,
+        )
+        return []
+
+    candidates = parse_yahoo_features(
+        data
+    )
+
+    candidates = deduplicate_yahoo_results(
+        candidates
+    )
+
+    return candidates
+
+
+def search_yahoo_local_keyword(
+    keyword,
+):
+    if not YAHOO_CLIENT_ID:
+        print(
+            "YAHOO_CLIENT_IDが設定されていません。"
+        )
+        return []
+
+    if not keyword:
+        keyword = "飲食店"
+
+    params = {
+        "appid": YAHOO_CLIENT_ID,
+        "query": keyword,
+        "results": 10,
+        "sort": "geo",
+        "detail": "standard",
+        "output": "json",
+    }
+
+    try:
+        response = requests.get(
+            YAHOO_LOCAL_SEARCH_URL,
+            params=params,
+            timeout=20,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+    except Exception as e:
+        print(
+            "Yahoo!キーワード検索エラー:",
+            e,
+        )
+        return []
+
+    candidates = parse_yahoo_features(
+        data
+    )
+
+    return deduplicate_yahoo_results(
+        candidates
+    )
+
+
+def get_yahoo_location_coordinates(
+    location,
+):
+    """
+    Yahoo!ローカルサーチで駅名を検索し、
+    駅のGeometry.Coordinatesから
+    緯度・経度を取得する。
+
+    Yahoo!のCoordinatesは
+    「経度,緯度」の順番。
+    """
+
+    if not YAHOO_CLIENT_ID:
+        print(
+            "YAHOO_CLIENT_IDが設定されていません。"
+        )
+        return None
+
+    params = {
+        "appid": YAHOO_CLIENT_ID,
+        "query": location,
+        "results": 10,
+        "sort": "geo",
+        "detail": "standard",
+        "output": "json",
+    }
+
+    try:
+        response = requests.get(
+            YAHOO_LOCAL_SEARCH_URL,
+            params=params,
+            timeout=20,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+    except Exception as e:
+        print(
+            "Yahoo!駅座標取得エラー:",
+            e,
+        )
+        return None
+
+    features = data.get(
+        "Feature",
+        [],
+    )
+
+    if isinstance(
+        features,
+        dict,
+    ):
+        features = [features]
+
+    exact_candidate = None
+    contains_candidate = None
+
+    for feature in features:
+
+        name = feature.get(
+            "Name",
+            "",
+        )
+
+        property_data = feature.get(
+            "Property",
+            {},
+        ) or {}
+
+        if isinstance(
+            property_data,
+            list,
+        ):
+            property_data = (
+                property_data[0]
+                if property_data
+                else {}
+            )
+
+        property_name = property_data.get(
+            "Name",
+            "",
+        )
+
+        geometry = feature.get(
+            "Geometry",
+            {},
+        ) or {}
+
+        coordinates = geometry.get(
+            "Coordinates",
+            "",
+        )
+
+        if not coordinates:
+            continue
+
+        candidate = (
+            name or property_name,
+            coordinates,
+        )
+
+        if (
+            name == location
+            or property_name == location
+        ):
+            exact_candidate = candidate
+            break
+
+        if (
+            location in name
+            or location in property_name
+        ):
+            if contains_candidate is None:
+                contains_candidate = candidate
+
+    candidate = (
+        exact_candidate
+        or contains_candidate
+    )
+
+    if not candidate:
+        print(
+            f"Yahoo!で駅座標を取得できませんでした: "
+            f"{location}"
+        )
+        return None
+
+    _, coordinate_text = candidate
+
+    try:
+        longitude_str, latitude_str = (
+            coordinate_text.split(",")[:2]
+        )
+
+        latitude = float(
+            latitude_str
+        )
+
+        longitude = float(
+            longitude_str
+        )
+
+    except Exception as e:
+        print(
+            "Yahoo!座標解析エラー:",
+            e,
+        )
+        return None
+
+    print(
+        f"Yahoo!駅座標取得成功: "
+        f"{location} "
+        f"lat={latitude}, "
+        f"lon={longitude}"
+    )
+
+    return latitude, longitude
+
+
+def search_yahoo_local(
+    user_text,
+):
+    """
+    ユーザーが選択した駅を
+    Yahoo! APIで検索し、
+    その駅の座標を中心として
+    半径1.5km以内を検索する。
+    """
+
+    location = ""
+
+    for option in LOCATION_OPTIONS:
+        if option in user_text:
+            location = option
+            break
+
+    keyword = build_yahoo_local_keyword(
+        user_text
+    )
+
+    if location:
+
+        coordinates = (
+            get_yahoo_location_coordinates(
+                location
+            )
+        )
+
+        if coordinates:
+
+            latitude, longitude = coordinates
+
+            if keyword == "その他":
+                keyword = "飲食店"
+
+            return search_yahoo_local_by_coordinates(
+                latitude,
+                longitude,
+                query=keyword,
+                distance=YAHOO_SEARCH_DISTANCE_METERS,
+            )
+
+        fallback_keyword = " ".join(
+            part
+            for part in [
+                location,
+                keyword,
+            ]
+            if part
+        )
+
+        return search_yahoo_local_keyword(
+            fallback_keyword
+        )
+
+    return search_yahoo_local_keyword(
+        keyword
+    )
+
+
+# =========================================================
+# Yahoo!検索結果整形
+# =========================================================
+
+def format_yahoo_results(
+    results,
+):
+    if not results:
+        return "Yahoo!ローカルサーチ結果なし"
+
+    lines = []
+
+    for index, shop in enumerate(
+        results,
+        start=1,
+    ):
+
+        lines.append(
+            f"{index}. "
+            f"{shop.get('name', '')}"
+        )
+
+        if shop.get("genre"):
             lines.append(
-                f"   URL: {url}"
+                f"   ジャンル: "
+                f"{shop.get('genre', '')}"
+            )
+
+        if shop.get("address"):
+            lines.append(
+                f"   住所: "
+                f"{shop.get('address', '')}"
+            )
+
+        if shop.get("station"):
+            lines.append(
+                f"   駅: "
+                f"{shop.get('station', '')}"
+            )
+
+        if shop.get("tel"):
+            lines.append(
+                f"   電話: "
+                f"{shop.get('tel', '')}"
+            )
+
+        if shop.get("distance"):
+            lines.append(
+                f"   距離: "
+                f"{shop.get('distance', '')}"
+            )
+
+        if shop.get("url"):
+            lines.append(
+                f"   URL: "
+                f"{shop.get('url', '')}"
             )
 
         lines.append("")
@@ -1148,26 +1484,79 @@ def format_tavily_results(results):
     return "\n".join(lines)
 
 
-def get_tavily_context(user_text):
+# =========================================================
+# Hot Pepper結果整形
+# =========================================================
 
-    if not should_search_tavily(
-        user_text
+def format_hotpepper_results(
+    results,
+):
+    if not results:
+        return "Hot Pepper検索結果なし"
+
+    lines = []
+
+    for index, shop in enumerate(
+        results,
+        start=1,
     ):
 
-        return ""
+        lines.append(
+            f"{index}. "
+            f"{shop.get('name', '')}"
+        )
 
-    query = (
-        f"{user_text} "
-        "店舗 営業 閉店 最新情報"
-    )
+        if shop.get("genre"):
+            lines.append(
+                f"   ジャンル: "
+                f"{shop.get('genre', '')}"
+            )
 
-    results = search_tavily(
-        query
-    )
+        if shop.get("address"):
+            lines.append(
+                f"   住所: "
+                f"{shop.get('address', '')}"
+            )
 
-    return format_tavily_results(
-        results
-    )
+        if shop.get("station"):
+            lines.append(
+                f"   最寄駅: "
+                f"{shop.get('station', '')}"
+            )
+
+        if shop.get("budget"):
+            lines.append(
+                f"   予算: "
+                f"{shop.get('budget', '')}"
+            )
+
+        if shop.get("open"):
+            lines.append(
+                f"   営業時間: "
+                f"{shop.get('open', '')}"
+            )
+
+        if shop.get("tavily_status"):
+            lines.append(
+                f"   Tavily確認: "
+                f"{shop.get('tavily_status', '')}"
+            )
+
+        if shop.get("tavily_reason"):
+            lines.append(
+                f"   最新情報: "
+                f"{shop.get('tavily_reason', '')[:300]}"
+            )
+
+        if shop.get("url"):
+            lines.append(
+                f"   URL: "
+                f"{shop.get('url', '')}"
+            )
+
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # =========================================================
@@ -1176,39 +1565,21 @@ def get_tavily_context(user_text):
 
 def build_gourmet_prompt(
     user_id,
-    user_text
+    user_text,
 ):
-
-    system_prompt = (
-        load_gourmet_system_prompt()
-    )
-
-    history = get_conversation_history(
-        user_id
-    )
-
-    # -----------------------------------------------------
-    # Hot Pepper
-    #
-    # ここが今回の重要修正。
-    #
-    # user_text全体ではなく、
-    # build_hotpepper_keyword() で
-    # 「場所＋ジャンル」だけを検索する。
-    # -----------------------------------------------------
-
     hotpepper_results = []
+
+    yahoo_results = []
 
     if should_search_hotpepper(
         user_text
     ):
 
-        print(
-            "Hot Pepper検索開始：",
+        hotpepper_results = search_hotpepper(
             user_text
         )
 
-        hotpepper_results = search_hotpepper(
+        yahoo_results = search_yahoo_local(
             user_text
         )
 
@@ -1218,19 +1589,19 @@ def build_gourmet_prompt(
         )
     )
 
-    # -----------------------------------------------------
-    # Tavily
-    # -----------------------------------------------------
-
-    tavily_context = (
-        get_tavily_context(
-            user_text
+    yahoo_context = (
+        format_yahoo_results(
+            yahoo_results
         )
     )
 
-    # -----------------------------------------------------
-    # 会話履歴
-    # -----------------------------------------------------
+    tavily_context = get_tavily_context(
+        user_text
+    )
+
+    history = get_conversation_history(
+        user_id
+    )
 
     history_text = ""
 
@@ -1238,122 +1609,108 @@ def build_gourmet_prompt(
 
         history_lines = []
 
-        for message in history:
+        for item in history:
 
-            role = message.get(
+            role = item.get(
                 "role",
-                ""
+                "",
             )
 
-            content = message.get(
+            content = item.get(
                 "content",
-                ""
+                "",
             )
 
-            if role == "user":
-
-                history_lines.append(
-                    f"ユーザー：{content}"
-                )
-
-            elif role == "assistant":
-
-                history_lines.append(
-                    f"AIアヤフミ：{content}"
-                )
+            history_lines.append(
+                f"{role}: {content}"
+            )
 
         history_text = "\n".join(
             history_lines
         )
 
-    # -----------------------------------------------------
-    # 最終プロンプト
-    # -----------------------------------------------------
-
     prompt = f"""
-{system_prompt}
+あなたは「AIアヤフミ（グルメ）」です。
+ユーザーの希望に合った飲食店を探して提案してください。
 
-========================================
-今回のユーザー検索条件
-========================================
-
+【ユーザーの今回の依頼】
 {user_text}
 
-========================================
-会話履歴
-========================================
-
+【過去の会話】
 {history_text}
 
-========================================
-Hot Pepper検索結果
-========================================
-
+【Hot Pepper検索結果】
 {hotpepper_context}
 
-========================================
-Tavily検索結果
-========================================
+【Yahoo!ローカルサーチ検索結果】
+{yahoo_context}
 
+【Tavily最新情報】
 {tavily_context}
 
-========================================
-今回の回答ルール
-========================================
+【重要ルール】
 
-1. ユーザーが指定した検索条件を最優先してください。
+1. ユーザーが指定した条件を最優先してください。
 
-2. 今回は場所・ジャンル・人数・予算・時間が
-   すでに選択されています。
+2. 場所、ジャンル、人数、予算、利用時間などが
+   すでに指定されている場合は、
+   同じことをもう一度質問しないでください。
 
-3. 条件が足りないからといって、
-   予算・人数・時間などをユーザーに
-   もう一度質問しないでください。
+3. Hot Pepperの検索結果を優先的に利用してください。
 
-4. Hot Pepperの店舗情報がある場合は、
-   その情報を優先して候補を提示してください。
+4. Yahoo!ローカルサーチの結果も活用してください。
 
-5. Hot Pepper検索は
-   「場所＋ジャンル」で実施されています。
-   人数・予算・時間はAI側で候補を判断する条件です。
+5. Yahoo!ローカルサーチは、
+   ユーザーが選択した駅をYahoo! APIで取得し、
+   その駅の座標を中心として
+   半径1.5km以内を検索しています。
 
-6. 選択された予算に合わない店舗は、
-   できるだけ候補から外してください。
+6. Hot PepperとYahoo!で同じ店舗が出ている場合は、
+   重複して大量に表示しないでください。
 
-7. 選択された人数に適しているか、
-   利用しやすい店舗かを考慮してください。
+7. Hot PepperとYahoo!の情報を組み合わせて、
+   店名、ジャンル、場所、予算、営業時間などを
+   分かりやすく整理してください。
 
-8. 選択された時間に営業している可能性が
-   低い店舗は候補から外してください。
+8. ユーザーが予算を指定している場合は、
+   予算に合う店を優先してください。
 
-9. Tavilyで閉店が確認された店舗は
-   絶対に候補として提示しないでください。
+9. ユーザーが人数を指定している場合は、
+   その人数で利用しやすい店を優先してください。
 
-10. 検索結果に存在しない店舗を
-    推測で作らないでください。
+10. ユーザーが昼・夜など利用時間を指定している場合は、
+    その時間帯に利用しやすい店を優先してください。
 
-11. 店舗が見つからなかった場合は、
-    「見つかりませんでした」と正直に伝えてください。
+11. Tavilyで閉店と判断された店舗は、
+    絶対に候補として表示しないでください。
 
-12. 店舗候補がある場合は、
-    店名・場所・予算などを分かりやすく整理してください。
+12. Tavilyで確認できない場合は、
+    勝手に営業中・閉店などと断定しないでください。
 
-13. ユーザーが選択した条件を
-    回答の中でも簡潔に確認してください。
+13. 検索結果に存在しない情報を勝手に作らないでください。
 
-14. 不要に長い説明は避けてください。
+14. 条件に合う店が少ない場合は、
+    無理に条件に合うと断定せず、
+    「条件に近い候補」として正直に説明してください。
 
-========================================
-ユーザーの今回の入力
-========================================
+15. 店舗候補は見やすく整理してください。
 
-{user_text}
+16. 最後に、ユーザーが指定した条件を
+    簡潔に確認しても構いません。
+
+17. 検索結果にURLがある場合は、
+    可能な範囲で店舗URLも提示してください。
+
+18. 回答はLINEで読みやすいように、
+    長くなりすぎないようにしてください。
+
+19. 店舗情報を紹介するときは、
+    「店名」「おすすめ理由」「予算・特徴」
+    が分かりやすい構成にしてください。
+
+20. 検索結果が複数ある場合は、
+    特に条件に合いそうな店舗を優先してください。
 """
-
-    print(
-        "APIプロンプト文字数：",
-        len(prompt)
-    )
 
     return prompt
 
@@ -1363,25 +1720,18 @@ Tavily検索結果
 # =========================================================
 
 def ask_gemini(prompt):
-
     if not GEMINI_API_KEY:
-
         print(
-            "GEMINI_API_KEYがありません"
+            "GEMINI_API_KEYが設定されていません。"
         )
-
         return None
 
-    print(
-        "Gemini処理開始..."
-    )
-
     headers = {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
 
     params = {
-        "key": GEMINI_API_KEY
+        "key": GEMINI_API_KEY,
     }
 
     payload = {
@@ -1397,24 +1747,21 @@ def ask_gemini(prompt):
     }
 
     try:
-
         response = requests.post(
             GEMINI_URL,
             headers=headers,
             params=params,
             json=payload,
-            timeout=60
-        )
-
-        print(
-            "Gemini HTTPステータス：",
-            response.status_code
+            timeout=60,
         )
 
         if response.status_code != 200:
+            print(
+                "Gemini HTTP:",
+                response.status_code,
+            )
 
             print(
-                "Geminiエラー：",
                 response.text[:1000]
             )
 
@@ -1422,21 +1769,46 @@ def ask_gemini(prompt):
 
         data = response.json()
 
-        return (
-            data
-            .get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text")
+        candidates = data.get(
+            "candidates",
+            [],
         )
+
+        if not candidates:
+            return None
+
+        parts = (
+            candidates[0]
+            .get("content", {})
+            .get("parts", [])
+        )
+
+        texts = []
+
+        for part in parts:
+
+            text = part.get(
+                "text",
+                "",
+            )
+
+            if text:
+                texts.append(text)
+
+        result = "\n".join(
+            texts
+        ).strip()
+
+        if not result:
+            return None
+
+        return result
 
     except Exception as e:
-
         print(
-            "Gemini例外：",
-            e
+            "Gemini APIエラー:",
+            e,
         )
-
         return None
 
 
@@ -1445,24 +1817,17 @@ def ask_gemini(prompt):
 # =========================================================
 
 def ask_groq(prompt):
-
     if not GROQ_API_KEY:
-
         print(
-            "GROQ_API_KEYがありません"
+            "GROQ_API_KEYが設定されていません。"
         )
-
         return None
 
-    print(
-        "Groq処理開始..."
-    )
-
     headers = {
-        "Authorization":
-            f"Bearer {GROQ_API_KEY}",
-        "Content-Type":
-            "application/json"
+        "Authorization": (
+            f"Bearer {GROQ_API_KEY}"
+        ),
+        "Content-Type": "application/json",
     }
 
     payload = {
@@ -1470,7 +1835,7 @@ def ask_groq(prompt):
         "messages": [
             {
                 "role": "user",
-                "content": prompt
+                "content": prompt,
             }
         ],
         "temperature": 0.3,
@@ -1478,81 +1843,55 @@ def ask_groq(prompt):
     }
 
     try:
-
-        response = post_with_retry(
+        response = requests.post(
             GROQ_URL,
             headers=headers,
-            json_data=payload,
-            timeout=60
-        )
-
-        print(
-            "Groq HTTPステータス：",
-            response.status_code
+            json=payload,
+            timeout=60,
         )
 
         if response.status_code != 200:
+            print(
+                "Groq HTTP:",
+                response.status_code,
+            )
 
             print(
-                "Groqエラー：",
-                response.text[:2000]
+                response.text[:1000]
             )
 
             return None
 
         data = response.json()
 
-        # Rate Limit情報
-        print(
-            "Groq RateLimit残りリクエスト：",
-            response.headers.get(
-                "x-ratelimit-remaining-requests"
-            )
+        choices = data.get(
+            "choices",
+            [],
         )
 
-        print(
-            "Groq RateLimit残りトークン：",
-            response.headers.get(
-                "x-ratelimit-remaining-tokens"
-            )
+        if not choices:
+            return None
+
+        message = choices[0].get(
+            "message",
+            {},
         )
 
-        print(
-            "Groq RateLimitリセット：",
-            response.headers.get(
-                "x-ratelimit-reset-tokens"
-            )
+        result = message.get(
+            "content",
+            "",
         )
 
-        answer = (
-            data
-            .get("choices", [{}])[0]
-            .get("message", {})
-            .get("content")
-        )
+        if not result:
+            return None
 
-        if answer:
-
-            print(
-                "Groqレスポンス："
-            )
-
-            print(
-                json.dumps(
-                    data,
-                    ensure_ascii=False
-                )
-            )
-
-        return answer
+        return result.strip()
 
     except Exception as e:
-
         print(
-            "Groq例外：",
-            e
+            "Groq APIエラー:",
+            e,
         )
-
         return None
 
 
@@ -1561,28 +1900,21 @@ def ask_groq(prompt):
 # =========================================================
 
 def ask_openrouter(prompt):
-
     if not OPENROUTER_API_KEY:
-
         print(
-            "OPENROUTER_API_KEYがありません"
+            "OPENROUTER_API_KEYが設定されていません。"
         )
-
         return None
 
-    print(
-        "OpenRouter処理開始..."
-    )
-
     headers = {
-        "Authorization":
-            f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type":
-            "application/json",
-        "HTTP-Referer":
-            "https://ai-ayafumi-gourmet.onrender.com",
-        "X-Title":
-            "AI Ayafumi Gourmet",
+        "Authorization": (
+            f"Bearer {OPENROUTER_API_KEY}"
+        ),
+        "Content-Type": "application/json",
+        "HTTP-Referer": (
+            "https://ai-ayafumi-gourmet.onrender.com"
+        ),
+        "X-Title": "AIアヤフミ（グルメ）",
     }
 
     payload = {
@@ -1590,7 +1922,7 @@ def ask_openrouter(prompt):
         "messages": [
             {
                 "role": "user",
-                "content": prompt
+                "content": prompt,
             }
         ],
         "temperature": 0.3,
@@ -1598,44 +1930,55 @@ def ask_openrouter(prompt):
     }
 
     try:
-
-        response = post_with_retry(
+        response = requests.post(
             OPENROUTER_URL,
             headers=headers,
-            json_data=payload,
-            timeout=60
-        )
-
-        print(
-            "OpenRouter HTTPステータス：",
-            response.status_code
+            json=payload,
+            timeout=60,
         )
 
         if response.status_code != 200:
+            print(
+                "OpenRouter HTTP:",
+                response.status_code,
+            )
 
             print(
-                "OpenRouterエラー：",
-                response.text[:2000]
+                response.text[:1000]
             )
 
             return None
 
         data = response.json()
 
-        return (
-            data
-            .get("choices", [{}])[0]
-            .get("message", {})
-            .get("content")
+        choices = data.get(
+            "choices",
+            [],
         )
+
+        if not choices:
+            return None
+
+        message = choices[0].get(
+            "message",
+            {},
+        )
+
+        result = message.get(
+            "content",
+            "",
+        )
+
+        if not result:
+            return None
+
+        return result.strip()
 
     except Exception as e:
-
         print(
-            "OpenRouter例外：",
-            e
+            "OpenRouter APIエラー:",
+            e,
         )
-
         return None
 
 
@@ -1644,375 +1987,382 @@ def ask_openrouter(prompt):
 # =========================================================
 
 def clean_answer(answer):
-
     if not answer:
-
-        return answer
+        return ""
 
     answer = answer.strip()
 
-    # JSONで返ってきた場合の簡易処理
-    if answer.startswith("{"):
-
-        try:
-
-            data = json.loads(
-                answer
-            )
-
-            if isinstance(data, dict):
-
-                if "answer" in data:
-
-                    return str(
-                        data["answer"]
-                    )
-
-                if "content" in data:
-
-                    return str(
-                        data["content"]
-                    )
-
-        except Exception:
-            pass
+    answer = answer.replace(
+        "### ",
+        "",
+    )
 
     return answer
 
 
 # =========================================================
-# グルメAI
+# グルメAI本体
 # =========================================================
 
 def ask_gourmet_ai(
     user_id,
-    user_text
+    user_text,
 ):
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "グルメAI処理開始：",
-        user_text
-    )
-
-    print(
-        "会話ユーザーID：",
-        user_id
-    )
-
-    history = get_conversation_history(
-        user_id
-    )
-
-    print(
-        "現在の会話履歴件数：",
-        len(history)
-    )
-
     prompt = build_gourmet_prompt(
         user_id,
-        user_text
-    )
-
-    answer = None
-
-    # -----------------------------------------------------
-    # Gemini
-    # -----------------------------------------------------
-
-    if GEMINI_API_KEY:
-
-        answer = ask_gemini(
-            prompt
-        )
-
-    # -----------------------------------------------------
-    # Groq
-    # -----------------------------------------------------
-
-    if not answer and GROQ_API_KEY:
-
-        answer = ask_groq(
-            prompt
-        )
-
-    # -----------------------------------------------------
-    # OpenRouter
-    # -----------------------------------------------------
-
-    if not answer and OPENROUTER_API_KEY:
-
-        answer = ask_openrouter(
-            prompt
-        )
-
-    # -----------------------------------------------------
-    # 完全失敗
-    # -----------------------------------------------------
-
-    if not answer:
-
-        answer = (
-            "申し訳ありません。\n"
-            "現在、店舗検索AIに接続できませんでした。"
-        )
-
-    answer = clean_answer(
-        answer
-    )
-
-    # -----------------------------------------------------
-    # 会話履歴
-    # -----------------------------------------------------
-
-    add_conversation_message(
-        user_id,
-        "user",
-        user_text
-    )
-
-    add_conversation_message(
-        user_id,
-        "assistant",
-        answer
-    )
-
-    print(
-        "会話履歴更新後の件数：",
-        len(
-            get_conversation_history(
-                user_id
-            )
-        )
-    )
-
-    print(
-        "========================================"
-    )
-
-    return answer
-
-
-# =========================================================
-# 選択フロー処理
-# =========================================================
-
-def handle_gourmet_selection(
-    user_id,
-    user_text,
-    reply_token
-):
-
-    state = get_gourmet_search_state(
-        user_id
-    )
-
-    step = state["step"]
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "LINE選択フロー：",
-        step
-    )
-
-    print(
-        "LINE選択内容：",
-        user_text
+        user_text,
     )
 
     # =====================================================
-    # 最初から
+    # ① Groqを最優先
     # =====================================================
 
-    if user_text == "最初から":
+    answer = ask_groq(
+        prompt
+    )
 
-        start_gourmet_search(
-            user_id
-        )
-
-        send_location_selection(
-            reply_token
-        )
-
-        return
-
-    # =====================================================
-    # 検索開始
-    # =====================================================
-
-    if (
-        step == "confirm"
-        and user_text == "この条件で検索"
-    ):
-
-        final_text = (
-            f"{state['location']}で"
-            f"{state['genre']}を探す。"
-            f"予算は{state['budget']}。"
-            f"{state['people']}で利用。"
-            f"利用時間は{state['time']}。"
-        )
-
+    if answer:
         print(
-            "LINE選択条件完成"
+            "AI回答: Groq"
         )
-
-        print()
-
-        print(
-            final_text
-        )
-
-        print()
-
-        answer = ask_gourmet_ai(
-            user_id,
-            final_text
-        )
-
-        # 検索終了後は次回の入力で
-        # 新しい検索を開始できるようにする
-        gourmet_search_states.pop(
-            user_id,
-            None
-        )
-
-        reply_to_line(
-            reply_token,
+        return clean_answer(
             answer
         )
 
-        return
+    # =====================================================
+    # ② Groq失敗 → Gemini
+    # =====================================================
+
+    answer = ask_gemini(
+        prompt
+    )
+
+    if answer:
+        print(
+            "AI回答: Gemini"
+        )
+        return clean_answer(
+            answer
+        )
 
     # =====================================================
-    # location
+    # ③ Groq・Gemini両方失敗 → OpenRouter
+    # =====================================================
+
+    answer = ask_openrouter(
+        prompt
+    )
+
+    if answer:
+        print(
+            "AI回答: OpenRouter"
+        )
+        return clean_answer(
+            answer
+        )
+
+    return (
+        "すみません。"
+        "現在、グルメ検索AIに接続できませんでした。"
+        "少し時間を置いてもう一度試してください。"
+    )
+
+# =========================================================
+# 検索フロー
+# =========================================================
+
+def start_search_flow(
+    reply_token,
+    user_id,
+):
+    state = get_search_state(
+        user_id
+    )
+
+    state["step"] = "location"
+
+    reply_text(
+        reply_token,
+        "どの駅の周辺で探しますか？",
+        build_quick_reply(
+            LOCATION_OPTIONS
+        ),
+    )
+
+
+def handle_search_selection(
+    reply_token,
+    user_id,
+    user_text,
+):
+    state = get_search_state(
+        user_id
+    )
+
+    step = state.get(
+        "step",
+        "location",
+    )
+
+    # =====================================================
+    # 場所
     # =====================================================
 
     if step == "location":
 
-        if user_text in LOCATION_OPTIONS:
+        if user_text not in LOCATION_OPTIONS:
 
-            state["location"] = user_text
-            state["step"] = "genre"
-
-            send_genre_selection(
-                reply_token
+            reply_text(
+                reply_token,
+                "駅を選択してください。",
+                build_quick_reply(
+                    LOCATION_OPTIONS
+                ),
             )
 
             return
 
-        # 「開始」などが来た場合
-        start_gourmet_search(
-            user_id
-        )
+        state["location"] = user_text
+        state["step"] = "genre"
 
-        send_location_selection(
-            reply_token
+        reply_text(
+            reply_token,
+            "ジャンルは何にしますか？",
+            build_quick_reply(
+                GENRE_OPTIONS
+            ),
         )
 
         return
 
     # =====================================================
-    # genre
+    # ジャンル
     # =====================================================
 
     if step == "genre":
 
-        if user_text in GENRE_OPTIONS:
+        if user_text not in GENRE_OPTIONS:
 
-            state["genre"] = user_text
-            state["step"] = "people"
-
-            send_people_selection(
-                reply_token
+            reply_text(
+                reply_token,
+                "ジャンルを選択してください。",
+                build_quick_reply(
+                    GENRE_OPTIONS
+                ),
             )
 
             return
 
+        state["genre"] = user_text
+        state["step"] = "people"
+
+        reply_text(
+            reply_token,
+            "何人で利用しますか？",
+            build_quick_reply(
+                PEOPLE_OPTIONS
+            ),
+        )
+
+        return
+
     # =====================================================
-    # people
+    # 人数
     # =====================================================
 
     if step == "people":
 
-        if user_text in PEOPLE_OPTIONS:
+        if user_text not in PEOPLE_OPTIONS:
 
-            state["people"] = user_text
-            state["step"] = "budget"
-
-            send_budget_selection(
-                reply_token
+            reply_text(
+                reply_token,
+                "人数を選択してください。",
+                build_quick_reply(
+                    PEOPLE_OPTIONS
+                ),
             )
 
             return
 
+        state["people"] = user_text
+        state["step"] = "budget"
+
+        reply_text(
+            reply_token,
+            "予算はどれくらいですか？",
+            build_quick_reply(
+                BUDGET_OPTIONS
+            ),
+        )
+
+        return
+
     # =====================================================
-    # budget
+    # 予算
     # =====================================================
 
     if step == "budget":
 
-        if user_text in BUDGET_OPTIONS:
+        if user_text not in BUDGET_OPTIONS:
 
-            state["budget"] = user_text
-            state["step"] = "time"
-
-            send_time_selection(
-                reply_token
+            reply_text(
+                reply_token,
+                "予算を選択してください。",
+                build_quick_reply(
+                    BUDGET_OPTIONS
+                ),
             )
 
             return
 
+        state["budget"] = user_text
+        state["step"] = "time"
+
+        reply_text(
+            reply_token,
+            "利用時間はいつですか？",
+            build_quick_reply(
+                TIME_OPTIONS
+            ),
+        )
+
+        return
+
     # =====================================================
-    # time
+    # 時間
     # =====================================================
 
     if step == "time":
 
-        if user_text in TIME_OPTIONS:
+        if user_text not in TIME_OPTIONS:
 
-            state["time"] = user_text
-            state["step"] = "confirm"
-
-            print(
-                "LINE選択条件完成"
-            )
-
-            final_preview = (
-                f"{state['location']}で"
-                f"{state['genre']}を探す。"
-                f"予算は{state['budget']}。"
-                f"{state['people']}で利用。"
-                f"利用時間は{state['time']}。"
-            )
-
-            print()
-            print(final_preview)
-            print()
-
-            send_confirmation(
+            reply_text(
                 reply_token,
-                state
+                "利用時間を選択してください。",
+                build_quick_reply(
+                    TIME_OPTIONS
+                ),
             )
 
             return
 
+        state["time"] = user_text
+        state["step"] = "confirmation"
+
+        confirmation = (
+            build_confirmation_text(
+                state
+            )
+        )
+
+        reply_text(
+            reply_token,
+            (
+                f"{confirmation}\n\n"
+                "この条件で探しますか？"
+            ),
+            build_quick_reply(
+                [
+                    "この条件で探す",
+                    "条件をやり直す",
+                ]
+            ),
+        )
+
+        return
+
     # =====================================================
-    # 想定外
+    # 確認
     # =====================================================
 
-    reply_to_line(
-        reply_token,
-        "選択内容を確認できませんでした。\n"
-        "最初から検索をやり直します。",
-        ["最初から"]
-    )
+    if step == "confirmation":
+
+        if user_text == "条件をやり直す":
+
+            reset_search_state(
+                user_id
+            )
+
+            start_search_flow(
+                reply_token,
+                user_id,
+            )
+
+            return
+
+        if user_text != "この条件で探す":
+
+            reply_text(
+                reply_token,
+                (
+                    "「この条件で探す」または"
+                    "「条件をやり直す」を選択してください。"
+                ),
+                build_quick_reply(
+                    [
+                        "この条件で探す",
+                        "条件をやり直す",
+                    ]
+                ),
+            )
+
+            return
+
+        # =================================================
+        # AI検索
+        # =================================================
+
+        search_text = (
+            build_confirmation_text(
+                state
+            )
+        )
+
+        add_conversation_history(
+            user_id,
+            "user",
+            search_text,
+        )
+
+        reply_text(
+            reply_token,
+            "探しています。少々お待ちください…",
+        )
+
+        answer = ask_gourmet_ai(
+            user_id,
+            search_text,
+        )
+
+        add_conversation_history(
+            user_id,
+            "assistant",
+            answer,
+        )
+
+        reset_search_state(
+            user_id
+        )
+
+        try:
+
+            push_text(
+                user_id,
+                answer,
+            )
+
+            print(
+                "LINE最終回答送信成功"
+            )
+
+        except Exception as e:
+
+            print(
+                "LINE Push Messageエラー:",
+                e,
+            )
+
+        return
 
 
 # =========================================================
@@ -2021,71 +2371,157 @@ def handle_gourmet_selection(
 
 @app.route(
     "/health",
-    methods=["GET"]
+    methods=["GET"],
 )
 def health():
 
     return jsonify({
-        "status": "ok"
+        "status": "ok",
+        "service": "AIアヤフミ（グルメ）",
     })
 
 
 # =========================================================
-# PowerShell用テスト
+# Yahoo!テスト
+# =========================================================
+
+@app.route(
+    "/test_yahoo",
+    methods=["POST"],
+)
+def test_yahoo():
+
+    body = request.get_json(
+        silent=True
+    ) or {}
+
+    user_text = body.get(
+        "message",
+        "",
+    )
+
+    if not user_text:
+
+        return jsonify({
+            "error": "messageがありません",
+        }), 400
+
+    results = search_yahoo_local(
+        user_text
+    )
+
+    return jsonify({
+        "message": user_text,
+        "count": len(results),
+        "results": results,
+    })
+
+
+# =========================================================
+# Yahoo!駅周辺テスト
+# =========================================================
+
+@app.route(
+    "/test_yahoo_nearby",
+    methods=["POST"],
+)
+def test_yahoo_nearby():
+
+    body = request.get_json(
+        silent=True
+    ) or {}
+
+    keyword = body.get(
+        "keyword",
+        "ラーメン",
+    )
+
+    location = "京王堀之内駅"
+
+    coordinates = (
+        get_yahoo_location_coordinates(
+            location
+        )
+    )
+
+    if not coordinates:
+
+        return jsonify({
+            "error": "駅座標を取得できませんでした",
+            "location": location,
+        }), 500
+
+    latitude, longitude = coordinates
+
+    results = (
+        search_yahoo_local_by_coordinates(
+            latitude,
+            longitude,
+            query=keyword,
+            distance=YAHOO_SEARCH_DISTANCE_METERS,
+        )
+    )
+
+    return jsonify({
+        "location": location,
+        "center": {
+            "latitude": latitude,
+            "longitude": longitude,
+        },
+        "distance": YAHOO_SEARCH_DISTANCE_METERS,
+        "count": len(results),
+        "results": results,
+    })
+
+
+# =========================================================
+# AI単体テスト
 # =========================================================
 
 @app.route(
     "/test",
-    methods=["POST"]
+    methods=["POST"],
 )
-def test():
+def test_ai():
 
-    try:
+    body = request.get_json(
+        silent=True
+    ) or {}
 
-        data = request.get_json(
-            silent=True
-        ) or {}
+    user_text = body.get(
+        "message",
+        "",
+    )
 
-        user_text = data.get(
-            "message",
-            ""
-        )
-
-        if not user_text:
-
-            return jsonify({
-                "error": "message is required"
-            }), 400
-
-        print(
-            "========================================"
-        )
-
-        print(
-            "PowerShell TEST：",
-            user_text
-        )
-
-        answer = ask_gourmet_ai(
-            "powershell-test",
-            user_text
-        )
+    if not user_text:
 
         return jsonify({
-            "message": user_text,
-            "answer": answer
-        })
+            "error": "messageがありません",
+        }), 400
 
-    except Exception as e:
+    user_id = "test-user"
 
-        print(
-            "/testエラー：",
-            e
-        )
+    add_conversation_history(
+        user_id,
+        "user",
+        user_text,
+    )
 
-        return jsonify({
-            "error": str(e)
-        }), 500
+    answer = ask_gourmet_ai(
+        user_id,
+        user_text,
+    )
+
+    add_conversation_history(
+        user_id,
+        "assistant",
+        answer,
+    )
+
+    return jsonify({
+        "message": user_text,
+        "answer": answer,
+    })
 
 
 # =========================================================
@@ -2094,13 +2530,13 @@ def test():
 
 @app.route(
     "/callback",
-    methods=["POST"]
+    methods=["POST"],
 )
 def callback():
 
     signature = request.headers.get(
         "X-Line-Signature",
-        ""
+        "",
     )
 
     body = request.get_data(
@@ -2111,13 +2547,13 @@ def callback():
 
         events = line_parser.parse(
             body,
-            signature
+            signature,
         )
 
     except InvalidSignatureError:
 
         print(
-            "LINE署名エラー"
+            "LINE署名検証エラー"
         )
 
         return "Invalid signature", 400
@@ -2125,8 +2561,8 @@ def callback():
     except Exception as e:
 
         print(
-            "Webhook解析エラー：",
-            e
+            "LINE Webhook解析エラー:",
+            e,
         )
 
         return "Bad Request", 400
@@ -2135,88 +2571,172 @@ def callback():
 
         if not isinstance(
             event,
-            MessageEvent
+            MessageEvent,
         ):
-
             continue
 
         if not isinstance(
             event.message,
-            TextMessageContent
+            TextMessageContent,
         ):
-
             continue
 
         user_id = event.source.user_id
 
-        user_text = event.message.text
+        if not user_id:
+            continue
 
-        reply_token = event.reply_token
-
-        print()
-        print(
-            "========================================"
-        )
-
-        print(
-            "LINE受信：",
-            user_text
-        )
-
-        print()
+        user_text = (
+            event.message.text
+            or ""
+        ).strip()
 
         print(
-            "LINEユーザーID：",
-            user_id
+            f"LINE受信: "
+            f"user={user_id}, "
+            f"text={user_text}"
         )
 
-        print()
-
-        # -------------------------------------------------
+        # =================================================
         # 初回
-        # -------------------------------------------------
+        # =================================================
 
-        if user_id not in gourmet_search_states:
+        if user_id not in search_states:
 
-            start_gourmet_search(
-                user_id
+            # 店検索系のメッセージなら
+            # 検索フロー開始
+            if should_search_hotpepper(
+                user_text
+            ):
+
+                search_states[user_id] = {
+                    "step": "location",
+                    "location": "",
+                    "genre": "",
+                    "people": "",
+                    "budget": "",
+                    "time": "",
+                }
+
+                # すでに駅が入力されている場合
+                # そのまま次へ進める
+                selected_location = ""
+
+                for option in LOCATION_OPTIONS:
+
+                    if option in user_text:
+                        selected_location = option
+                        break
+
+                if selected_location:
+
+                    state = search_states[
+                        user_id
+                    ]
+
+                    state["location"] = (
+                        selected_location
+                    )
+
+                    state["step"] = "genre"
+
+                    reply_text(
+                        event.reply_token,
+                        "ジャンルは何にしますか？",
+                        build_quick_reply(
+                            GENRE_OPTIONS
+                        ),
+                    )
+
+                else:
+
+                    start_search_flow(
+                        event.reply_token,
+                        user_id,
+                    )
+
+                continue
+
+            # -----------------------------------------
+            # 通常会話
+            # -----------------------------------------
+
+            add_conversation_history(
+                user_id,
+                "user",
+                user_text,
             )
 
-            # 「開始」「店探し」など
-            # 何が来てもまず選択画面
-            send_location_selection(
-                reply_token
+            answer = ask_gourmet_ai(
+                user_id,
+                user_text,
+            )
+
+            add_conversation_history(
+                user_id,
+                "assistant",
+                answer,
+            )
+
+            reply_text(
+                event.reply_token,
+                answer,
             )
 
             continue
 
-        # -------------------------------------------------
-        # 選択フロー
-        # -------------------------------------------------
+        # =================================================
+        # 検索フロー中
+        # =================================================
 
-        handle_gourmet_selection(
+        handle_search_selection(
+            event.reply_token,
             user_id,
             user_text,
-            reply_token
         )
 
     return "OK", 200
 
 
 # =========================================================
-# 起動
+# メイン
 # =========================================================
 
 if __name__ == "__main__":
 
     port = int(
-        os.environ.get(
+        os.getenv(
             "PORT",
-            5000
+            "5000",
         )
     )
 
+    print("=" * 50)
+
+    print(
+        "AIアヤフミ（グルメ）"
+    )
+
+    print("=" * 50)
+
+    print(
+        f"PORT: {port}"
+    )
+
+    print(
+        "Yahoo!検索半径: "
+        f"{YAHOO_SEARCH_DISTANCE_METERS}m"
+    )
+
+    print(
+        "Yahoo!駅座標: "
+        "Yahoo APIから自動取得"
+    )
+
+    print("=" * 50)
+
     app.run(
         host="0.0.0.0",
-        port=port
+        port=port,
+        debug=False,
     )
