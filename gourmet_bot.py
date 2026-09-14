@@ -353,10 +353,6 @@ def build_hotpepper_keyword(
 
     keyword = user_text.strip()
 
-    # --------------------------------------------------------
-    # 検索指示・不要な日本語を削除
-    # --------------------------------------------------------
-
     remove_words = [
 
         "探して",
@@ -392,10 +388,6 @@ def build_hotpepper_keyword(
             " "
         )
 
-    # --------------------------------------------------------
-    # 助詞・検索上不要な表現を整理
-    # --------------------------------------------------------
-
     replace_words = [
 
         "で",
@@ -411,10 +403,6 @@ def build_hotpepper_keyword(
             word,
             " "
         )
-
-    # --------------------------------------------------------
-    # 「ラーメン屋」→「ラーメン」
-    # --------------------------------------------------------
 
     keyword = keyword.replace(
         "ラーメン屋",
@@ -446,17 +434,9 @@ def build_hotpepper_keyword(
         "カレー"
     )
 
-    # --------------------------------------------------------
-    # 複数スペースを整理
-    # --------------------------------------------------------
-
     keyword = " ".join(
         keyword.split()
     )
-
-    # --------------------------------------------------------
-    # 空になった場合は元の入力を使用
-    # --------------------------------------------------------
 
     if not keyword:
 
@@ -469,6 +449,536 @@ def build_hotpepper_keyword(
     )
 
     return keyword
+
+
+# ============================================================
+# Tavily Web検索
+# ============================================================
+
+def search_tavily(
+    query
+):
+
+    print(
+        "Tavily検索開始：",
+        query,
+        flush=True
+    )
+
+    if not TAVILY_API_KEY:
+
+        print(
+            "TAVILY_API_KEY が設定されていません。",
+            flush=True
+        )
+
+        return []
+
+    data = {
+
+        "api_key": TAVILY_API_KEY,
+
+        "query": query,
+
+        "search_depth": "basic",
+
+        "topic": "general",
+
+        "max_results": 5,
+
+        "include_answer": False,
+
+        "include_raw_content": False
+    }
+
+    try:
+
+        response = post_with_retry(
+            TAVILY_URL,
+            headers={
+                "Content-Type":
+                    "application/json"
+            },
+            json=data,
+            timeout=30,
+            retries=1
+        )
+
+    except Exception as e:
+
+        print(
+            "Tavily通信エラー：",
+            e,
+            flush=True
+        )
+
+        return []
+
+    print(
+        "Tavily HTTPステータス：",
+        response.status_code,
+        flush=True
+    )
+
+    if response.status_code >= 400:
+
+        print(
+            "Tavily HTTPエラー：",
+            flush=True
+        )
+
+        print(
+            response.text[:3000],
+            flush=True
+        )
+
+        return []
+
+    try:
+
+        result = response.json()
+
+    except ValueError:
+
+        print(
+            "TavilyレスポンスがJSONではありません。",
+            flush=True
+        )
+
+        return []
+
+    results = result.get(
+        "results",
+        []
+    )
+
+    print(
+        "Tavily検索件数：",
+        len(results),
+        flush=True
+    )
+
+    return results
+
+
+# ============================================================
+# Hot Pepper店舗ごとのTavily閉店確認
+# ============================================================
+
+def check_hotpepper_shop_with_tavily(
+    shop
+):
+
+    name = shop.get(
+        "name",
+        ""
+    )
+
+    address = shop.get(
+        "address",
+        ""
+    )
+
+    if not name:
+
+        return {
+            "status": "unknown",
+            "reason": "店舗名が取得できませんでした。"
+        }
+
+    query = (
+        f'"{name}" "{address}" '
+        "営業 閉店 閉業 営業終了 移転 最新情報"
+    )
+
+    print(
+        "店舗別Tavily確認：",
+        name,
+        flush=True
+    )
+
+    results = search_tavily(
+        query
+    )
+
+    if not results:
+
+        return {
+            "status": "unknown",
+            "reason": "Tavilyから確認情報を取得できませんでした。"
+        }
+
+    # --------------------------------------------------------
+    # 検索結果をまとめる
+    # --------------------------------------------------------
+
+    matched_texts = []
+
+    for result in results:
+
+        title = str(
+            result.get(
+                "title",
+                ""
+            )
+        )
+
+        content = str(
+            result.get(
+                "content",
+                ""
+            )
+        )
+
+        text = (
+            title
+            + "\n"
+            + content
+        )
+
+        # 店舗名が含まれる検索結果を優先
+        if name in text:
+
+            matched_texts.append(
+                text
+            )
+
+    if not matched_texts:
+
+        return {
+            "status": "unknown",
+            "reason": "店舗名が一致するWeb情報を確認できませんでした。"
+        }
+
+    # --------------------------------------------------------
+    # 店舗名一致結果だけを判定
+    # --------------------------------------------------------
+
+    combined_text = "\n".join(
+        matched_texts
+    )
+
+    # 強い閉店表現
+    strong_closed_phrases = [
+
+        "閉店しました",
+        "閉店いたしました",
+        "閉店のお知らせ",
+        "閉店となりました",
+        "営業終了しました",
+        "営業終了いたしました",
+        "営業終了のお知らせ",
+        "閉業しました",
+        "閉業いたしました",
+        "閉業のお知らせ",
+        "店舗閉鎖",
+        "店を閉めました"
+    ]
+
+    # 一般的な閉店表現
+    normal_closed_phrases = [
+
+        "閉店",
+        "閉業",
+        "営業終了"
+    ]
+
+    # 閉店ではないことを示す表現
+    negative_closed_phrases = [
+
+        "閉店していません",
+        "閉店してない",
+        "閉店ではありません",
+        "閉店情報はありません",
+        "閉店の情報はありません",
+        "営業終了していません",
+        "営業終了してない"
+    ]
+
+    # 営業中を示す表現
+    open_phrases = [
+
+        "現在営業中",
+        "現在も営業",
+        "営業しています",
+        "営業しております",
+        "営業中",
+        "営業再開",
+        "営業を続けています"
+    ]
+
+    closed_score = 0
+    open_score = 0
+
+    # --------------------------------------------------------
+    # 閉店表現
+    # --------------------------------------------------------
+
+    for phrase in strong_closed_phrases:
+
+        if phrase in combined_text:
+
+            closed_score += 3
+
+    for phrase in normal_closed_phrases:
+
+        if phrase in combined_text:
+
+            # 否定表現の近くにある可能性がある場合は
+            # 一般閉店スコアを加算しない
+            is_negated = any(
+                negative in combined_text
+                for negative in negative_closed_phrases
+            )
+
+            if not is_negated:
+
+                closed_score += 1
+
+    # --------------------------------------------------------
+    # 営業中表現
+    # --------------------------------------------------------
+
+    for phrase in open_phrases:
+
+        if phrase in combined_text:
+
+            open_score += 2
+
+    # --------------------------------------------------------
+    # 判定
+    # --------------------------------------------------------
+
+    if (
+        closed_score >= 3
+        and closed_score > open_score
+    ):
+
+        reason = (
+            "Web検索結果に閉店・営業終了を示す情報がありました。"
+        )
+
+        print(
+            "❌ 閉店確認・店舗除外：",
+            name,
+            flush=True
+        )
+
+        return {
+            "status": "closed",
+            "reason": reason
+        }
+
+    if (
+        open_score >= 2
+        and open_score >= closed_score
+    ):
+
+        reason = (
+            "Web検索結果に現在営業中を示す情報がありました。"
+        )
+
+        print(
+            "✅ 営業中情報確認：",
+            name,
+            flush=True
+        )
+
+        return {
+            "status": "open",
+            "reason": reason
+        }
+
+    print(
+        "⚠️ 店舗営業状況を断定できず：",
+        name,
+        flush=True
+    )
+
+    return {
+        "status": "unknown",
+        "reason": (
+            "Web検索結果だけでは営業状況を断定できませんでした。"
+        )
+    }
+
+
+# ============================================================
+# Hot Pepper店舗をTavilyで確認
+# ============================================================
+
+def verify_hotpepper_shops_with_tavily(
+    shops
+):
+
+    if not shops:
+
+        return []
+
+    if not TAVILY_API_KEY:
+
+        print(
+            "TAVILY_API_KEYがないため店舗別確認をスキップします。",
+            flush=True
+        )
+
+        return shops
+
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+    print(
+        "Hot Pepper店舗ごとのTavily閉店チェック開始",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+    verified_shops = []
+
+    for index, shop in enumerate(
+        shops,
+        start=1
+    ):
+
+        print(
+            "",
+            flush=True
+        )
+
+        print(
+            f"===== Tavily店舗確認 {index}/{len(shops)} =====",
+            flush=True
+        )
+
+        print(
+            "店舗名：",
+            shop.get(
+                "name",
+                ""
+            ),
+            flush=True
+        )
+
+        verification = (
+            check_hotpepper_shop_with_tavily(
+                shop
+            )
+        )
+
+        shop["tavily_status"] = (
+            verification.get(
+                "status",
+                "unknown"
+            )
+        )
+
+        shop["tavily_reason"] = (
+            verification.get(
+                "reason",
+                ""
+            )
+        )
+
+        status = shop[
+            "tavily_status"
+        ]
+
+        if status == "closed":
+
+            print(
+                "❌ 閉店のため候補から除外：",
+                shop.get(
+                    "name",
+                    ""
+                ),
+                flush=True
+            )
+
+            continue
+
+        if status == "open":
+
+            print(
+                "✅ 営業中候補として保持：",
+                shop.get(
+                    "name",
+                    ""
+                ),
+                flush=True
+            )
+
+        else:
+
+            print(
+                "⚠️ 営業状況不明のため候補として保持：",
+                shop.get(
+                    "name",
+                    ""
+                ),
+                flush=True
+            )
+
+        verified_shops.append(
+            shop
+        )
+
+    # --------------------------------------------------------
+    # 番号を振り直す
+    # --------------------------------------------------------
+
+    for index, shop in enumerate(
+        verified_shops,
+        start=1
+    ):
+
+        shop["number"] = index
+
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+    print(
+        "Hot Pepper + Tavily確認完了",
+        flush=True
+    )
+
+    print(
+        "確認前：",
+        len(shops),
+        "件",
+        flush=True
+    )
+
+    print(
+        "確認後：",
+        len(verified_shops),
+        "件",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+    return verified_shops
 
 
 # ============================================================
@@ -679,15 +1189,24 @@ def search_hotpepper(
             ""
         )
 
-        url_pc = (
-            shop.get(
-                "urls",
-                {}
-            ).get(
+        urls_data = shop.get(
+            "urls",
+            {}
+        )
+
+        if isinstance(
+            urls_data,
+            dict
+        ):
+
+            url_pc = urls_data.get(
                 "pc",
                 ""
             )
-        )
+
+        else:
+
+            url_pc = ""
 
         formatted_shops.append(
             {
@@ -702,14 +1221,31 @@ def search_hotpepper(
             }
         )
 
+    # --------------------------------------------------------
+    # ここで店舗ごとのTavily確認
+    # --------------------------------------------------------
+
+    verified_shops = (
+        verify_hotpepper_shops_with_tavily(
+            formatted_shops
+        )
+    )
+
     print(
-        "Hot Pepper店舗候補をAIへ渡します：",
-        len(formatted_shops),
+        "Hot Pepper + Tavily確認後の店舗候補：",
+        len(verified_shops),
         "件",
         flush=True
     )
 
-    return formatted_shops
+    print(
+        "Hot Pepper店舗候補をAIへ渡します：",
+        len(verified_shops),
+        "件",
+        flush=True
+    )
+
+    return verified_shops
 
 
 # ============================================================
@@ -731,6 +1267,16 @@ def format_hotpepper_results(
 
     for shop in shops:
 
+        tavily_status = shop.get(
+            "tavily_status",
+            "unknown"
+        )
+
+        tavily_reason = shop.get(
+            "tavily_reason",
+            ""
+        )
+
         lines.append(
             f"{shop['number']}. "
             f"{shop['name']}\n"
@@ -739,122 +1285,14 @@ def format_hotpepper_results(
             f"駅：{shop['station']}\n"
             f"予算：{shop['budget']}\n"
             f"ランチ：{shop['lunch']}\n"
+            f"Tavily営業確認：{tavily_status}\n"
+            f"Tavily確認理由：{tavily_reason}\n"
             f"Hot Pepper：{shop['url']}"
         )
 
     return "\n\n".join(
         lines
     )
-
-
-# ============================================================
-# Tavily Web検索
-# ============================================================
-
-def search_tavily(
-    query
-):
-
-    print(
-        "Tavily検索開始：",
-        query,
-        flush=True
-    )
-
-    if not TAVILY_API_KEY:
-
-        print(
-            "TAVILY_API_KEY が設定されていません。",
-            flush=True
-        )
-
-        return []
-
-    data = {
-
-        "api_key": TAVILY_API_KEY,
-
-        "query": query,
-
-        "search_depth": "basic",
-
-        "topic": "general",
-
-        "max_results": 5,
-
-        "include_answer": False,
-
-        "include_raw_content": False
-    }
-
-    try:
-
-        response = post_with_retry(
-            TAVILY_URL,
-            headers={
-                "Content-Type":
-                    "application/json"
-            },
-            json=data,
-            timeout=30,
-            retries=1
-        )
-
-    except Exception as e:
-
-        print(
-            "Tavily通信エラー：",
-            e,
-            flush=True
-        )
-
-        return []
-
-    print(
-        "Tavily HTTPステータス：",
-        response.status_code,
-        flush=True
-    )
-
-    if response.status_code >= 400:
-
-        print(
-            "Tavily HTTPエラー：",
-            flush=True
-        )
-
-        print(
-            response.text[:3000],
-            flush=True
-        )
-
-        return []
-
-    try:
-
-        result = response.json()
-
-    except ValueError:
-
-        print(
-            "TavilyレスポンスがJSONではありません。",
-            flush=True
-        )
-
-        return []
-
-    results = result.get(
-        "results",
-        []
-    )
-
-    print(
-        "Tavily検索件数：",
-        len(results),
-        flush=True
-    )
-
-    return results
 
 
 # ============================================================
@@ -1095,6 +1533,22 @@ def build_gourmet_prompt(
 
             + "店舗候補です。"
 
+            + "さらに各店舗についてTavilyによる"
+
+            + "営業状況確認を実施しています。"
+
+            + "Tavilyで閉店と判断された店舗は、"
+
+            + "AIに渡す店舗候補から除外済みです。"
+
+            + "したがって、上記の店舗一覧には"
+
+            + "閉店と判断された店舗は含まれていません。"
+
+            + "ただし、Tavily営業確認がunknownの店舗は、"
+
+            + "営業中と断定してはいけません。"
+
             + "ユーザーが店舗を探している場合は、"
 
             + "この店舗候補を使って回答してください。"
@@ -1211,6 +1665,10 @@ def build_gourmet_prompt(
         + "Hot Pepper APIによる実店舗検索が"
 
         + "すでに実行されています。"
+
+        + "さらに各Hot Pepper店舗について、"
+
+        + "Tavilyによる営業状況確認も実行されています。"
 
         + "ユーザーが地域とジャンルなどを"
 
