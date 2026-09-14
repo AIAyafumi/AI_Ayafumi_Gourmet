@@ -812,6 +812,78 @@ def reply_to_line(
 
 
 # ============================================================
+# PowerShell / API テスト用
+# ============================================================
+
+@app.route(
+    "/test",
+    methods=["POST"]
+)
+def test():
+
+    data = request.get_json(
+        silent=True
+    )
+
+    if not data or "message" not in data:
+
+        return {
+            "error": "message が指定されていません。"
+        }, 400
+
+    user_text = data["message"]
+
+    if not isinstance(
+        user_text,
+        str
+    ):
+
+        return {
+            "error": "message は文字列で指定してください。"
+        }, 400
+
+    user_text = user_text.strip()
+
+    if not user_text:
+
+        return {
+            "error": "message が空です。"
+        }, 400
+
+    print(
+        "テスト受信：",
+        user_text
+    )
+
+    try:
+
+        answer = ask_gourmet_ai(
+            user_text
+        )
+
+        print(
+            "テスト回答：",
+            answer
+        )
+
+        return {
+            "message": user_text,
+            "answer": answer
+        }
+
+    except Exception as e:
+
+        print(
+            "テスト処理エラー：",
+            e
+        )
+
+        return {
+            "error": str(e)
+        }, 500
+
+
+# ============================================================
 # LINE Webhook
 # ============================================================
 
