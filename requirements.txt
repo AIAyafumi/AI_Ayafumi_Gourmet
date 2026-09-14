@@ -1,4 +1,4 @@
 flask
 requests
 python-dotenv
-groq
+groqline-bot-sdk
