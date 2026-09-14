@@ -119,13 +119,6 @@ search_states = {}
 # 選択肢
 # =========================================================
 
-LOCATION_OPTIONS = [
-    "京王堀之内駅",
-    "南大沢駅",
-    "多摩センター駅",
-    "八王子駅",
-]
-
 GENRE_OPTIONS = [
     "ラーメン",
     "焼肉",
@@ -140,20 +133,25 @@ GENRE_OPTIONS = [
     "その他",
 ]
 
+
+# ラーメンを選択した場合のみ表示する
+RAMEN_STYLE_OPTIONS = [
+    "家系",
+    "二郎系",
+    "町中華系",
+    "魚介系",
+    "味噌",
+    "その他",
+    "指定なし",
+]
+
+
 PEOPLE_OPTIONS = [
     "1人",
     "2人",
     "3人",
     "4人",
     "5人以上",
-]
-
-BUDGET_OPTIONS = [
-    "～1,000円",
-    "～2,000円",
-    "～3,000円",
-    "～5,000円",
-    "5,000円～",
 ]
 
 TIME_OPTIONS = [
@@ -227,6 +225,372 @@ def normalize_for_duplicate(text):
     )
 
     return text
+
+
+def normalize_shop_name_for_duplicate(text):
+    """
+    店舗名専用の重複判定正規化。
+    """
+
+    text = normalize_for_duplicate(text)
+
+    if not text:
+        return ""
+
+    text = re.sub(
+        r"[「」『』【】（）()［］\[\]〈〉<>・･/／\\]",
+        "",
+        text,
+    )
+
+    return text
+
+
+def normalize_address_for_duplicate(text):
+    """
+    住所専用の重複判定正規化。
+    """
+
+    text = normalize_for_duplicate(text)
+
+    if not text:
+        return ""
+
+    text = text.replace(
+        "丁目",
+        "-",
+    )
+
+    text = text.replace(
+        "番地",
+        "-",
+    )
+
+    text = text.replace(
+        "番",
+        "-",
+    )
+
+    text = text.replace(
+        "号",
+        "",
+    )
+
+    text = re.sub(
+        r"-+",
+        "-",
+        text,
+    )
+
+    return text.strip("-")
+
+
+def parse_coordinates(coordinates):
+    """
+    Yahoo!の
+        longitude,latitude
+    形式をfloatへ変換する。
+
+    戻り値:
+        (latitude, longitude)
+    """
+
+    if not coordinates:
+        return None
+
+    try:
+        parts = str(
+            coordinates
+        ).split(",")
+
+        if len(parts) < 2:
+            return None
+
+        longitude = float(
+            parts[0]
+        )
+
+        latitude = float(
+            parts[1]
+        )
+
+        return latitude, longitude
+
+    except Exception:
+        return None
+
+
+def get_shop_coordinates(shop):
+    """
+    店舗データから緯度経度を取得する。
+    """
+
+    coordinates = shop.get(
+        "coordinates",
+        "",
+    )
+
+    parsed = parse_coordinates(
+        coordinates
+    )
+
+    if parsed:
+        return parsed
+
+    lat = shop.get(
+        "lat",
+        "",
+    )
+
+    lng = shop.get(
+        "lng",
+        "",
+    )
+
+    try:
+
+        if lat and lng:
+            return (
+                float(lat),
+                float(lng),
+            )
+
+    except Exception:
+        pass
+
+    return None
+
+
+def coordinates_are_close(
+    shop1,
+    shop2,
+    threshold_meters=50,
+):
+    """
+    2店舗の座標が一定距離以内なら
+    同一店舗候補と判定する。
+    """
+
+    coordinates1 = get_shop_coordinates(
+        shop1
+    )
+
+    coordinates2 = get_shop_coordinates(
+        shop2
+    )
+
+    if not coordinates1 or not coordinates2:
+        return False
+
+    lat1, lon1 = coordinates1
+    lat2, lon2 = coordinates2
+
+    lat_distance = (
+        abs(lat1 - lat2)
+        * 111000
+    )
+
+    average_latitude = (
+        lat1 + lat2
+    ) / 2
+
+    lon_distance = (
+        abs(lon1 - lon2)
+        * 111000
+        * max(
+            0.1,
+            abs(
+                __import__("math").cos(
+                    __import__("math").radians(
+                        average_latitude
+                    )
+                )
+            ),
+        )
+    )
+
+    distance = (
+        lat_distance ** 2
+        + lon_distance ** 2
+    ) ** 0.5
+
+    return distance <= threshold_meters
+
+
+def shop_names_are_similar(
+    name1,
+    name2,
+):
+    """
+    店舗名の表記揺れを考慮して
+    同一店舗候補か判定する。
+    """
+
+    normalized1 = (
+        normalize_shop_name_for_duplicate(
+            name1
+        )
+    )
+
+    normalized2 = (
+        normalize_shop_name_for_duplicate(
+            name2
+        )
+    )
+
+    if not normalized1 or not normalized2:
+        return False
+
+    if normalized1 == normalized2:
+        return True
+
+    if (
+        len(normalized1) < 6
+        or len(normalized2) < 6
+    ):
+        return False
+
+    if (
+        normalized1 in normalized2
+        or normalized2 in normalized1
+    ):
+        return True
+
+    return False
+
+
+def shops_are_same_store(
+    shop1,
+    shop2,
+):
+    """
+    2つの店舗データが同一店舗か判定する。
+    """
+
+    name1 = normalize_shop_name_for_duplicate(
+        shop1.get(
+            "name",
+            "",
+        )
+    )
+
+    name2 = normalize_shop_name_for_duplicate(
+        shop2.get(
+            "name",
+            "",
+        )
+    )
+
+    address1 = normalize_address_for_duplicate(
+        shop1.get(
+            "address",
+            "",
+        )
+    )
+
+    address2 = normalize_address_for_duplicate(
+        shop2.get(
+            "address",
+            "",
+        )
+    )
+
+    # =====================================================
+    # ① 店名 + 住所 完全一致
+    # =====================================================
+
+    if (
+        name1
+        and name2
+        and address1
+        and address2
+        and name1 == name2
+        and address1 == address2
+    ):
+        return True
+
+    # =====================================================
+    # ② 店名 + 座標 完全一致
+    # =====================================================
+
+    coordinates1 = get_shop_coordinates(
+        shop1
+    )
+
+    coordinates2 = get_shop_coordinates(
+        shop2
+    )
+
+    if (
+        name1
+        and name2
+        and coordinates1
+        and coordinates2
+        and name1 == name2
+    ):
+
+        lat1, lon1 = coordinates1
+        lat2, lon2 = coordinates2
+
+        if (
+            abs(lat1 - lat2) < 0.000001
+            and abs(lon1 - lon2) < 0.000001
+        ):
+            return True
+
+    # =====================================================
+    # ③ 店名表記揺れ + 住所一致
+    # =====================================================
+
+    if (
+        name1
+        and name2
+        and address1
+        and address2
+        and shop_names_are_similar(
+            name1,
+            name2,
+        )
+        and address1 == address2
+    ):
+        return True
+
+    # =====================================================
+    # ④ 店名表記揺れ + 座標近接
+    # =====================================================
+
+    if (
+        name1
+        and name2
+        and shop_names_are_similar(
+            name1,
+            name2,
+        )
+        and coordinates_are_close(
+            shop1,
+            shop2,
+            threshold_meters=50,
+        )
+    ):
+        return True
+
+    # =====================================================
+    # ⑤ 店名完全一致 + 座標近接
+    # =====================================================
+
+    if (
+        name1
+        and name2
+        and name1 == name2
+        and coordinates_are_close(
+            shop1,
+            shop2,
+            threshold_meters=50,
+        )
+    ):
+        return True
+
+    return False
 
 
 def add_conversation_history(
@@ -329,8 +693,8 @@ def get_search_state(user_id):
             "step": "location",
             "location": "",
             "genre": "",
+            "ramen_style": "",
             "people": "",
-            "budget": "",
             "time": "",
         }
 
@@ -345,13 +709,62 @@ def reset_search_state(user_id):
 
 
 def build_confirmation_text(state):
+    genre_text = state["genre"]
+
+    if (
+        state.get("genre") == "ラーメン"
+        and state.get("ramen_style")
+        and state.get("ramen_style") != "指定なし"
+    ):
+        genre_text += (
+            f"（{state['ramen_style']}）"
+        )
+
     return (
         f"{state['location']}で"
-        f"{state['genre']}を探す。"
-        f"予算は{state['budget']}。"
+        f"{genre_text}を探す。"
         f"{state['people']}で利用。"
         f"利用時間は{state['time']}。"
     )
+
+
+# =========================================================
+# 駅名関連
+# =========================================================
+
+def normalize_station_name(location):
+    """
+    ユーザーが入力した駅名を整える。
+    """
+
+    location = normalize_text(location)
+
+    if not location:
+        return ""
+
+    if location.endswith("駅"):
+        return location
+
+    return f"{location}駅"
+
+
+def extract_location_from_text(user_text):
+    """
+    検索文から駅名部分を取得する。
+    """
+
+    user_text = normalize_text(user_text)
+
+    if not user_text:
+        return ""
+
+    if "で" in user_text:
+        location = user_text.split("で", 1)[0].strip()
+
+        if location:
+            return location
+
+    return user_text
 
 
 # =========================================================
@@ -380,14 +793,8 @@ def should_search_hotpepper(user_text):
         "開始",
     ]
 
-    # 「開始」は検索フロー開始
     if user_text == "開始":
         return True
-
-    # 駅名を直接入力した場合も検索フロー開始
-    for option in LOCATION_OPTIONS:
-        if option in user_text:
-            return True
 
     return any(
         keyword in user_text
@@ -398,12 +805,15 @@ def should_search_hotpepper(user_text):
 def build_hotpepper_keyword(user_text):
     parts = []
 
-    location = ""
+    location = extract_location_from_text(
+        user_text
+    )
 
-    for option in LOCATION_OPTIONS:
-        if option in user_text:
-            location = option
-            break
+    if location:
+        location = normalize_text(location)
+
+        if location:
+            parts.append(location)
 
     genre = ""
 
@@ -412,11 +822,23 @@ def build_hotpepper_keyword(user_text):
             genre = option
             break
 
-    if location:
-        parts.append(location)
-
     if genre and genre != "その他":
         parts.append(genre)
+
+    # ラーメン系統を検索キーワードにも追加
+    ramen_styles = [
+        "家系",
+        "二郎系",
+        "町中華系",
+        "魚介系",
+        "味噌",
+    ]
+
+    if genre == "ラーメン":
+        for style in ramen_styles:
+            if style in user_text:
+                parts.append(style)
+                break
 
     if not parts:
         return user_text
@@ -425,6 +847,10 @@ def build_hotpepper_keyword(user_text):
 
 
 def search_hotpepper(user_text):
+    """
+    Hot Pepperから店舗候補を取得する。
+    """
+
     if not HOTPEPPER_API_KEY:
         print(
             "HOTPEPPER_API_KEYが設定されていません。"
@@ -489,10 +915,6 @@ def search_hotpepper(user_text):
                 "station_name",
                 "",
             ),
-            "budget": (
-                shop.get("budget", {})
-                .get("name", "")
-            ),
             "open": shop.get(
                 "open",
                 "",
@@ -520,9 +942,19 @@ def search_hotpepper(user_text):
             "source": "Hot Pepper",
         })
 
-    results = verify_hotpepper_shops_with_tavily(
-        results
+    print(
+        f"Hot Pepper取得店舗数: "
+        f"{len(results)}件"
     )
+
+    for index, shop in enumerate(
+        results,
+        start=1,
+    ):
+        print(
+            f"  Hot Pepper {index}: "
+            f"{shop.get('name', '')}"
+        )
 
     return results
 
@@ -574,15 +1006,66 @@ def search_tavily(
     )
 
 
-def check_hotpepper_shop_with_tavily(shop):
-    name = shop.get(
-        "name",
-        "",
+def _build_tavily_shop_text(results):
+    text_parts = []
+
+    for result in results:
+        title = normalize_text(
+            result.get(
+                "title",
+                "",
+            )
+        )
+
+        content = normalize_text(
+            result.get(
+                "content",
+                "",
+            )
+        )
+
+        if title:
+            text_parts.append(
+                title
+            )
+
+        if content:
+            text_parts.append(
+                content
+            )
+
+    return " ".join(
+        text_parts
     )
 
-    address = shop.get(
-        "address",
-        "",
+
+def _contains_any(
+    text,
+    keywords,
+):
+    return any(
+        keyword in text
+        for keyword in keywords
+    )
+
+
+def check_shop_with_tavily(shop):
+    """
+    Tavilyを使って店舗の営業状況を確認する。
+    """
+
+    name = normalize_text(
+        shop.get(
+            "name",
+            "",
+        )
+    )
+
+    address = normalize_text(
+        shop.get(
+            "address",
+            "",
+        )
     )
 
     if not name:
@@ -594,7 +1077,8 @@ def check_hotpepper_shop_with_tavily(shop):
     query = (
         f'"{name}" '
         f"{address} "
-        "営業時間 営業中 閉店 移転 最新情報"
+        "営業状況 営業時間 営業中 閉店 閉業 移転 "
+        "最新情報"
     )
 
     results = search_tavily(
@@ -608,61 +1092,168 @@ def check_hotpepper_shop_with_tavily(shop):
             "reason": "",
         }
 
-    text_parts = []
-
-    for result in results:
-        title = result.get(
-            "title",
-            "",
-        )
-
-        content = result.get(
-            "content",
-            "",
-        )
-
-        text_parts.append(
-            f"{title} {content}"
-        )
-
-    combined = " ".join(
-        text_parts
+    combined = _build_tavily_shop_text(
+        results
     )
 
-    closed_keywords = [
-        "閉店",
-        "閉業",
-        "営業終了",
-        "店舗終了",
-        "閉店しました",
-        "閉店のお知らせ",
-        "移転",
+    if not combined:
+        return {
+            "status": "unknown",
+            "reason": "",
+        }
+
+    future_closure_keywords = [
+        "閉店予定",
+        "閉店する予定",
+        "閉店を予定",
+        "閉店予告",
+        "営業終了予定",
+        "営業終了を予定",
+        "閉店予定です",
+        "閉店することになりました",
     ]
 
-    if any(
-        keyword in combined
-        for keyword in closed_keywords
+    strong_closed_keywords = [
+        "閉店しました",
+        "閉店いたしました",
+        "閉店のお知らせ",
+        "閉店のお知らせです",
+        "営業終了しました",
+        "営業を終了しました",
+        "営業終了のお知らせ",
+        "営業を終了いたしました",
+        "閉業しました",
+        "閉業いたしました",
+        "廃業しました",
+        "廃業いたしました",
+        "店舗を閉鎖しました",
+        "店舗閉鎖",
+        "閉鎖しました",
+        "閉鎖いたしました",
+        "営業していません",
+        "現在営業していません",
+        "現在は営業していません",
+        "現在営業しておりません",
+        "店舗はありません",
+        "店舗は閉店",
+    ]
+
+    general_closed_keywords = [
+        "閉店",
+        "閉業",
+        "廃業",
+        "営業終了",
+        "店舗終了",
+        "閉鎖",
+    ]
+
+    has_future_closure = _contains_any(
+        combined,
+        future_closure_keywords,
+    )
+
+    has_strong_closed = _contains_any(
+        combined,
+        strong_closed_keywords,
+    )
+
+    has_general_closed = _contains_any(
+        combined,
+        general_closed_keywords,
+    )
+
+    strong_open_keywords = [
+        "現在営業中",
+        "現在も営業",
+        "現在営業しています",
+        "現在も営業しています",
+        "現在営業しております",
+        "営業中です",
+        "営業しています",
+        "営業しております",
+        "営業中",
+        "営業再開",
+        "営業再開しました",
+        "営業を再開しました",
+        "営業再開のお知らせ",
+        "現在営業中です",
+        "現在も営業中です",
+    ]
+
+    weak_open_keywords = [
+        "営業時間",
+        "定休日",
+        "ランチ営業",
+        "ディナー営業",
+    ]
+
+    has_strong_open = _contains_any(
+        combined,
+        strong_open_keywords,
+    )
+
+    has_weak_open = _contains_any(
+        combined,
+        weak_open_keywords,
+    )
+
+    relocation_keywords = [
+        "移転しました",
+        "移転いたしました",
+        "移転のお知らせ",
+        "移転しましたので",
+        "移転先",
+        "店舗を移転",
+    ]
+
+    has_relocation = _contains_any(
+        combined,
+        relocation_keywords,
+    )
+
+    if has_strong_closed:
+
+        if not has_strong_open:
+            return {
+                "status": "closed",
+                "reason": combined[:500],
+            }
+
+    if (
+        has_general_closed
+        and not has_future_closure
+        and not has_strong_open
     ):
+
+        if has_relocation:
+            return {
+                "status": "unknown",
+                "reason": combined[:500],
+            }
+
         return {
             "status": "closed",
             "reason": combined[:500],
         }
 
-    open_keywords = [
-        "営業中",
-        "営業しています",
-        "営業しております",
-        "営業時間",
-        "オープン",
-        "営業",
-    ]
-
-    if any(
-        keyword in combined
-        for keyword in open_keywords
-    ):
+    if has_strong_open:
         return {
             "status": "open",
+            "reason": combined[:500],
+        }
+
+    if (
+        has_relocation
+        or has_future_closure
+    ):
+        return {
+            "status": "unknown",
+            "reason": combined[:500],
+        }
+
+    if has_weak_open:
+        return {
+            "status": "unknown",
             "reason": combined[:500],
         }
 
@@ -672,14 +1263,33 @@ def check_hotpepper_shop_with_tavily(shop):
     }
 
 
-def verify_hotpepper_shops_with_tavily(
+def verify_shops_with_tavily(
     shops,
 ):
     verified = []
 
+    print(
+        "========================================"
+    )
+    print(
+        "統合店舗のTavily営業状況確認開始"
+    )
+    print(
+        f"Tavily確認対象: {len(shops)}件"
+    )
+    print(
+        "========================================"
+    )
+
     for shop in shops:
+
+        shop_name = shop.get(
+            "name",
+            "",
+        )
+
         verification = (
-            check_hotpepper_shop_with_tavily(
+            check_shop_with_tavily(
                 shop
             )
         )
@@ -694,11 +1304,46 @@ def verify_hotpepper_shops_with_tavily(
             "",
         )
 
+        print(
+            f"Tavily確認: "
+            f"{shop_name} → {status}"
+        )
+
+        if reason:
+
+            reason_log = (
+                reason
+                .replace("\n", " ")
+                .strip()
+            )
+
+            if len(reason_log) > 200:
+                reason_log = (
+                    reason_log[:200]
+                    + "..."
+                )
+
+            print(
+                f"  判定理由: "
+                f"{reason_log}"
+            )
+
+        else:
+            print(
+                "  判定理由: 情報なし"
+            )
+
         if status == "closed":
+
             print(
                 f"Tavily判定で除外: "
-                f"{shop.get('name', '')}"
+                f"{shop_name}"
             )
+
+            print(
+                "----------------------------------------"
+            )
+
             continue
 
         shop["tavily_status"] = status
@@ -706,7 +1351,29 @@ def verify_hotpepper_shops_with_tavily(
 
         verified.append(shop)
 
+        print(
+            f"候補として保持: "
+            f"{shop_name}"
+        )
+
+        print(
+            "----------------------------------------"
+        )
+
         time.sleep(0.2)
+
+    print(
+        "統合店舗のTavily営業状況確認終了"
+    )
+
+    print(
+        f"保持店舗数: "
+        f"{len(verified)}件"
+    )
+
+    print(
+        "========================================"
+    )
 
     return verified
 
@@ -747,6 +1414,7 @@ def get_tavily_context(user_text):
     context_parts = []
 
     for result in results:
+
         title = result.get(
             "title",
             "",
@@ -778,13 +1446,6 @@ def get_tavily_context(user_text):
 # =========================================================
 
 def build_yahoo_local_keyword(user_text):
-    location = ""
-
-    for option in LOCATION_OPTIONS:
-        if option in user_text:
-            location = option
-            break
-
     genre = ""
 
     for option in GENRE_OPTIONS:
@@ -793,10 +1454,30 @@ def build_yahoo_local_keyword(user_text):
             break
 
     if genre:
-        return genre
+        if genre == "その他":
+            return "飲食店"
 
-    if location:
-        return ""
+        keyword = genre
+
+        # ラーメン系統を検索キーワードにも追加
+        if genre == "ラーメン":
+
+            ramen_styles = [
+                "家系",
+                "二郎系",
+                "町中華系",
+                "魚介系",
+                "味噌",
+            ]
+
+            for style in ramen_styles:
+                if style in user_text:
+                    keyword = (
+                        f"{genre} {style}"
+                    )
+                    break
+
+        return keyword
 
     search_terms = [
         "お店",
@@ -831,6 +1512,7 @@ def parse_yahoo_features(data):
     candidates = []
 
     for feature in features:
+
         name = feature.get(
             "Name",
             "",
@@ -882,6 +1564,7 @@ def parse_yahoo_features(data):
         genre_names = []
 
         for genre in genre_data:
+
             if isinstance(
                 genre,
                 dict,
@@ -916,6 +1599,7 @@ def parse_yahoo_features(data):
         station_names = []
 
         for station in station_data:
+
             if isinstance(
                 station,
                 dict,
@@ -975,116 +1659,58 @@ def parse_yahoo_features(data):
 def deduplicate_yahoo_results(
     candidates,
 ):
-    """
-    Yahoo!ローカル検索結果の重複を除去する。
-    """
-
     unique = []
-
-    seen_name_address = set()
-    seen_name_coordinates = set()
-    seen_name_only = set()
-    seen_coordinates = set()
 
     for candidate in candidates:
 
-        name = normalize_for_duplicate(
-            candidate.get(
-                "name",
-                "",
-            )
-        )
+        duplicate_index = None
 
-        address = normalize_for_duplicate(
-            candidate.get(
-                "address",
-                "",
-            )
-        )
+        for index, existing in enumerate(
+            unique
+        ):
 
-        coordinates = normalize_for_duplicate(
-            candidate.get(
-                "coordinates",
-                "",
-            )
-        )
+            if shops_are_same_store(
+                candidate,
+                existing,
+            ):
+                duplicate_index = index
+                break
 
-        if name and address:
+        if duplicate_index is not None:
 
-            key = (
-                name,
-                address,
-            )
+            existing = unique[
+                duplicate_index
+            ]
 
-            if key in seen_name_address:
-                print(
-                    "Yahoo!重複除外:",
-                    candidate.get(
-                        "name",
-                        "",
-                    ),
-                    candidate.get(
-                        "address",
-                        "",
-                    ),
-                )
-                continue
-
-            seen_name_address.add(key)
-
-        elif name and coordinates:
-
-            key = (
-                name,
-                coordinates,
+            print(
+                "Yahoo!重複除外:",
+                candidate.get(
+                    "name",
+                    "",
+                ),
+                candidate.get(
+                    "address",
+                    "",
+                ),
             )
 
-            if key in seen_name_coordinates:
-                print(
-                    "Yahoo!重複除外:",
-                    candidate.get(
-                        "name",
-                        "",
-                    ),
-                )
-                continue
-
-            seen_name_coordinates.add(key)
-
-        elif name:
-
-            if name in seen_name_only:
-                print(
-                    "Yahoo!重複除外:",
-                    candidate.get(
-                        "name",
-                        "",
-                    ),
-                )
-                continue
-
-            seen_name_only.add(name)
-
-        elif coordinates:
-
-            if coordinates in seen_coordinates:
-                print(
-                    "Yahoo!重複除外:",
-                    candidate.get(
-                        "name",
-                        "",
-                    ),
-                )
-                continue
-
-            seen_coordinates.add(
-                coordinates
+            print(
+                "  → 既存:",
+                existing.get(
+                    "name",
+                    "",
+                ),
+                existing.get(
+                    "address",
+                    "",
+                ),
             )
 
-        else:
             continue
 
-        unique.append(candidate)
+        unique.append(
+            candidate
+        )
 
     print(
         f"Yahoo!重複除去: "
@@ -1133,10 +1759,12 @@ def search_yahoo_local_by_coordinates(
         data = response.json()
 
     except Exception as e:
+
         print(
             "Yahoo!座標検索エラー:",
             e,
         )
+
         return []
 
     candidates = parse_yahoo_features(
@@ -1183,10 +1811,12 @@ def search_yahoo_local_keyword(
         data = response.json()
 
     except Exception as e:
+
         print(
             "Yahoo!キーワード検索エラー:",
             e,
         )
+
         return []
 
     candidates = parse_yahoo_features(
@@ -1205,9 +1835,6 @@ def get_yahoo_location_coordinates(
     Yahoo!ローカルサーチで駅名を検索し、
     駅のGeometry.Coordinatesから
     緯度・経度を取得する。
-
-    Yahoo!のCoordinatesは
-    「経度,緯度」の順番。
     """
 
     if not YAHOO_CLIENT_ID:
@@ -1216,166 +1843,218 @@ def get_yahoo_location_coordinates(
         )
         return None
 
-    params = {
-        "appid": YAHOO_CLIENT_ID,
-        "query": location,
-        "results": 10,
-        "sort": "geo",
-        "detail": "standard",
-        "output": "json",
-    }
+    location = normalize_text(location)
 
-    try:
-        response = requests.get(
-            YAHOO_LOCAL_SEARCH_URL,
-            params=params,
-            timeout=20,
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-    except Exception as e:
-        print(
-            "Yahoo!駅座標取得エラー:",
-            e,
-        )
+    if not location:
         return None
 
-    features = data.get(
-        "Feature",
-        [],
+    station_name = normalize_station_name(
+        location
     )
 
-    if isinstance(
-        features,
-        dict,
-    ):
-        features = [features]
+    query_candidates = []
 
-    exact_candidate = None
-    contains_candidate = None
+    query_candidates.append(location)
 
-    for feature in features:
-
-        name = feature.get(
-            "Name",
-            "",
+    if station_name not in query_candidates:
+        query_candidates.append(
+            station_name
         )
 
-        property_data = feature.get(
-            "Property",
-            {},
-        ) or {}
+    for query in query_candidates:
 
-        if isinstance(
-            property_data,
-            list,
-        ):
-            property_data = (
-                property_data[0]
-                if property_data
-                else {}
+        params = {
+            "appid": YAHOO_CLIENT_ID,
+            "query": query,
+            "results": 10,
+            "sort": "geo",
+            "detail": "standard",
+            "output": "json",
+        }
+
+        try:
+            response = requests.get(
+                YAHOO_LOCAL_SEARCH_URL,
+                params=params,
+                timeout=20,
             )
 
-        property_name = property_data.get(
-            "Name",
-            "",
-        )
+            response.raise_for_status()
 
-        geometry = feature.get(
-            "Geometry",
-            {},
-        ) or {}
+            data = response.json()
 
-        coordinates = geometry.get(
-            "Coordinates",
-            "",
-        )
+        except Exception as e:
 
-        if not coordinates:
+            print(
+                "Yahoo!駅座標取得エラー:",
+                e,
+            )
+
             continue
 
+        features = data.get(
+            "Feature",
+            [],
+        )
+
+        if isinstance(
+            features,
+            dict,
+        ):
+            features = [features]
+
+        exact_candidate = None
+        contains_candidate = None
+        station_candidate = None
+
+        for feature in features:
+
+            name = feature.get(
+                "Name",
+                "",
+            )
+
+            property_data = feature.get(
+                "Property",
+                {},
+            ) or {}
+
+            if isinstance(
+                property_data,
+                list,
+            ):
+                property_data = (
+                    property_data[0]
+                    if property_data
+                    else {}
+                )
+
+            property_name = property_data.get(
+                "Name",
+                "",
+            )
+
+            geometry = feature.get(
+                "Geometry",
+                {},
+            ) or {}
+
+            coordinates = geometry.get(
+                "Coordinates",
+                "",
+            )
+
+            if not coordinates:
+                continue
+
+            candidate_name = (
+                name
+                or property_name
+            )
+
+            if not candidate_name:
+                continue
+
+            is_station = (
+                "駅" in candidate_name
+            )
+
+            candidate = (
+                candidate_name,
+                coordinates,
+            )
+
+            if (
+                candidate_name == station_name
+                or candidate_name == location
+            ):
+
+                if is_station:
+                    exact_candidate = candidate
+                    break
+
+                if exact_candidate is None:
+                    exact_candidate = candidate
+
+            if (
+                station_name in candidate_name
+                or location in candidate_name
+            ):
+
+                if is_station:
+
+                    if station_candidate is None:
+                        station_candidate = candidate
+
+                elif contains_candidate is None:
+
+                    contains_candidate = candidate
+
         candidate = (
-            name or property_name,
-            coordinates,
+            exact_candidate
+            or station_candidate
+            or contains_candidate
         )
 
-        if (
-            name == location
-            or property_name == location
-        ):
-            exact_candidate = candidate
-            break
+        if not candidate:
+            continue
 
-        if (
-            location in name
-            or location in property_name
-        ):
-            if contains_candidate is None:
-                contains_candidate = candidate
+        candidate_name, coordinate_text = candidate
 
-    candidate = (
-        exact_candidate
-        or contains_candidate
-    )
+        if "駅" not in candidate_name:
+            continue
 
-    if not candidate:
+        try:
+
+            longitude_str, latitude_str = (
+                coordinate_text.split(",")[:2]
+            )
+
+            latitude = float(
+                latitude_str
+            )
+
+            longitude = float(
+                longitude_str
+            )
+
+        except Exception as e:
+
+            print(
+                "Yahoo!座標解析エラー:",
+                e,
+            )
+
+            continue
+
         print(
-            f"Yahoo!で駅座標を取得できませんでした: "
-            f"{location}"
-        )
-        return None
-
-    _, coordinate_text = candidate
-
-    try:
-        longitude_str, latitude_str = (
-            coordinate_text.split(",")[:2]
+            f"Yahoo!駅座標取得成功: "
+            f"{candidate_name} "
+            f"lat={latitude}, "
+            f"lon={longitude}"
         )
 
-        latitude = float(
-            latitude_str
-        )
-
-        longitude = float(
-            longitude_str
-        )
-
-    except Exception as e:
-        print(
-            "Yahoo!座標解析エラー:",
-            e,
-        )
-        return None
+        return latitude, longitude
 
     print(
-        f"Yahoo!駅座標取得成功: "
-        f"{location} "
-        f"lat={latitude}, "
-        f"lon={longitude}"
+        f"Yahoo!で駅座標を取得できませんでした: "
+        f"{location}"
     )
 
-    return latitude, longitude
+    return None
 
 
 def search_yahoo_local(
     user_text,
 ):
     """
-    ユーザーが選択した駅を
-    Yahoo! APIで検索し、
-    その駅の座標を中心として
+    指定駅の座標を取得し、
     半径1.5km以内を検索する。
     """
 
-    location = ""
-
-    for option in LOCATION_OPTIONS:
-        if option in user_text:
-            location = option
-            break
+    location = extract_location_from_text(
+        user_text
+    )
 
     keyword = build_yahoo_local_keyword(
         user_text
@@ -1422,14 +2101,202 @@ def search_yahoo_local(
 
 
 # =========================================================
-# Yahoo!検索結果整形
+# Hot Pepper + Yahoo! 統合
 # =========================================================
 
-def format_yahoo_results(
+def merge_shop_results(
+    hotpepper_results,
+    yahoo_results,
+):
+    """
+    Hot PepperとYahoo!の検索結果を統合する。
+    """
+
+    print(
+        "========================================"
+    )
+
+    print(
+        "Hot Pepper + Yahoo! 店舗統合開始"
+    )
+
+    print(
+        f"Hot Pepper: "
+        f"{len(hotpepper_results)}件"
+    )
+
+    print(
+        f"Yahoo!: "
+        f"{len(yahoo_results)}件"
+    )
+
+    print(
+        "========================================"
+    )
+
+    merged = []
+
+    # =====================================================
+    # Hot Pepperを先に追加
+    # =====================================================
+
+    for shop in hotpepper_results:
+
+        new_shop = dict(shop)
+
+        new_shop["source"] = "Hot Pepper"
+
+        merged.append(
+            new_shop
+        )
+
+    # =====================================================
+    # Yahoo!を追加
+    # =====================================================
+
+    for yahoo_shop in yahoo_results:
+
+        existing_index = None
+
+        for index, existing in enumerate(
+            merged
+        ):
+
+            if shops_are_same_store(
+                yahoo_shop,
+                existing,
+            ):
+                existing_index = index
+                break
+
+        if existing_index is None:
+
+            new_shop = dict(
+                yahoo_shop
+            )
+
+            new_shop["source"] = (
+                "Yahoo!ローカルサーチ"
+            )
+
+            merged.append(
+                new_shop
+            )
+
+            print(
+                "統合追加:",
+                new_shop.get(
+                    "name",
+                    "",
+                ),
+                "← Yahoo!"
+            )
+
+            continue
+
+        existing = merged[
+            existing_index
+        ]
+
+        if not existing.get("genre"):
+            existing["genre"] = (
+                yahoo_shop.get(
+                    "genre",
+                    "",
+                )
+            )
+
+        if not existing.get("address"):
+            existing["address"] = (
+                yahoo_shop.get(
+                    "address",
+                    "",
+                )
+            )
+
+        if not existing.get("station"):
+            existing["station"] = (
+                yahoo_shop.get(
+                    "station",
+                    "",
+                )
+            )
+
+        if not existing.get("tel"):
+            existing["tel"] = (
+                yahoo_shop.get(
+                    "tel",
+                    "",
+                )
+            )
+
+        if not existing.get("url"):
+            existing["url"] = (
+                yahoo_shop.get(
+                    "url",
+                    "",
+                )
+            )
+
+        if not existing.get("coordinates"):
+            existing["coordinates"] = (
+                yahoo_shop.get(
+                    "coordinates",
+                    "",
+                )
+            )
+
+        if not existing.get("distance"):
+            existing["distance"] = (
+                yahoo_shop.get(
+                    "distance",
+                    "",
+                )
+            )
+
+        existing["source"] = (
+            "Hot Pepper + Yahoo!"
+        )
+
+        print(
+            "店舗統合:",
+            existing.get(
+                "name",
+                "",
+            ),
+            "← Hot Pepper + Yahoo!"
+        )
+
+    print(
+        "----------------------------------------"
+    )
+
+    print(
+        f"統合前: "
+        f"{len(hotpepper_results) + len(yahoo_results)}件"
+    )
+
+    print(
+        f"統合後: "
+        f"{len(merged)}件"
+    )
+
+    print(
+        "========================================"
+    )
+
+    return merged
+
+
+# =========================================================
+# 統合店舗整形
+# =========================================================
+
+def format_merged_results(
     results,
 ):
     if not results:
-        return "Yahoo!ローカルサーチ結果なし"
+        return "店舗検索結果なし"
 
     lines = []
 
@@ -1443,68 +2310,11 @@ def format_yahoo_results(
             f"{shop.get('name', '')}"
         )
 
-        if shop.get("genre"):
+        if shop.get("source"):
             lines.append(
-                f"   ジャンル: "
-                f"{shop.get('genre', '')}"
+                f"   情報元: "
+                f"{shop.get('source', '')}"
             )
-
-        if shop.get("address"):
-            lines.append(
-                f"   住所: "
-                f"{shop.get('address', '')}"
-            )
-
-        if shop.get("station"):
-            lines.append(
-                f"   駅: "
-                f"{shop.get('station', '')}"
-            )
-
-        if shop.get("tel"):
-            lines.append(
-                f"   電話: "
-                f"{shop.get('tel', '')}"
-            )
-
-        if shop.get("distance"):
-            lines.append(
-                f"   距離: "
-                f"{shop.get('distance', '')}"
-            )
-
-        if shop.get("url"):
-            lines.append(
-                f"   URL: "
-                f"{shop.get('url', '')}"
-            )
-
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-# =========================================================
-# Hot Pepper結果整形
-# =========================================================
-
-def format_hotpepper_results(
-    results,
-):
-    if not results:
-        return "Hot Pepper検索結果なし"
-
-    lines = []
-
-    for index, shop in enumerate(
-        results,
-        start=1,
-    ):
-
-        lines.append(
-            f"{index}. "
-            f"{shop.get('name', '')}"
-        )
 
         if shop.get("genre"):
             lines.append(
@@ -1524,27 +2334,27 @@ def format_hotpepper_results(
                 f"{shop.get('station', '')}"
             )
 
-        if shop.get("budget"):
-            lines.append(
-                f"   予算: "
-                f"{shop.get('budget', '')}"
-            )
-
         if shop.get("open"):
             lines.append(
                 f"   営業時間: "
                 f"{shop.get('open', '')}"
             )
 
+        if shop.get("distance"):
+            lines.append(
+                f"   距離: "
+                f"{shop.get('distance', '')}"
+            )
+
         if shop.get("tavily_status"):
             lines.append(
-                f"   Tavily確認: "
+                f"   Tavily営業状況: "
                 f"{shop.get('tavily_status', '')}"
             )
 
         if shop.get("tavily_reason"):
             lines.append(
-                f"   最新情報: "
+                f"   Tavily確認情報: "
                 f"{shop.get('tavily_reason', '')[:300]}"
             )
 
@@ -1560,6 +2370,26 @@ def format_hotpepper_results(
 
 
 # =========================================================
+# 旧フォーマット互換
+# =========================================================
+
+def format_yahoo_results(
+    results,
+):
+    return format_merged_results(
+        results
+    )
+
+
+def format_hotpepper_results(
+    results,
+):
+    return format_merged_results(
+        results
+    )
+
+
+# =========================================================
 # グルメAIプロンプト
 # =========================================================
 
@@ -1568,36 +2398,73 @@ def build_gourmet_prompt(
     user_text,
 ):
     hotpepper_results = []
-
     yahoo_results = []
+    merged_results = []
 
     if should_search_hotpepper(
         user_text
     ):
 
+        # =================================================
+        # ① Hot Pepper
+        # =================================================
+
         hotpepper_results = search_hotpepper(
             user_text
         )
+
+        # =================================================
+        # ② Yahoo!
+        # =================================================
 
         yahoo_results = search_yahoo_local(
             user_text
         )
 
-    hotpepper_context = (
-        format_hotpepper_results(
-            hotpepper_results
+        print(
+            f"Yahoo!取得店舗数: "
+            f"{len(yahoo_results)}件"
         )
+
+        # =================================================
+        # ③ Hot Pepper + Yahoo! 統合
+        # =================================================
+
+        merged_results = merge_shop_results(
+            hotpepper_results,
+            yahoo_results,
+        )
+
+        # =================================================
+        # ④ 統合後にTavily確認
+        # =================================================
+
+        print(
+            f"統合店舗 → Tavily確認前: "
+            f"{len(merged_results)}件"
+        )
+
+        merged_results = verify_shops_with_tavily(
+            merged_results
+        )
+
+        print(
+            f"統合店舗 → Tavily確認後: "
+            f"{len(merged_results)}件"
+        )
+
+    merged_context = format_merged_results(
+        merged_results
     )
 
-    yahoo_context = (
-        format_yahoo_results(
-            yahoo_results
-        )
-    )
-
-    tavily_context = get_tavily_context(
+    if should_search_hotpepper(
         user_text
-    )
+    ):
+        tavily_context = ""
+    else:
+        tavily_context = get_tavily_context(
+            user_text
+        )
 
     history = get_conversation_history(
         user_id
@@ -1639,11 +2506,8 @@ def build_gourmet_prompt(
 【過去の会話】
 {history_text}
 
-【Hot Pepper検索結果】
-{hotpepper_context}
-
-【Yahoo!ローカルサーチ検索結果】
-{yahoo_context}
+【Hot Pepper + Yahoo! 統合後の店舗検索結果】
+{merged_context}
 
 【Tavily最新情報】
 {tavily_context}
@@ -1652,64 +2516,81 @@ def build_gourmet_prompt(
 
 1. ユーザーが指定した条件を最優先してください。
 
-2. 場所、ジャンル、人数、予算、利用時間などが
+2. 場所、ジャンル、人数、利用時間などが
    すでに指定されている場合は、
    同じことをもう一度質問しないでください。
 
-3. Hot Pepperの検索結果を優先的に利用してください。
+3. ラーメンの系統が指定されている場合は、
+   その系統を候補選定の重要条件として扱ってください。
 
-4. Yahoo!ローカルサーチの結果も活用してください。
+4. 例えば「家系」と指定された場合、
+   検索結果に家系である根拠がある店舗を優先してください。
 
-5. Yahoo!ローカルサーチは、
-   ユーザーが選択した駅をYahoo! APIで取得し、
-   その駅の座標を中心として
-   半径1.5km以内を検索しています。
+5. 「二郎系」と指定された場合、
+   検索結果に二郎系である根拠がある店舗を優先してください。
 
-6. Hot PepperとYahoo!で同じ店舗が出ている場合は、
-   重複して大量に表示しないでください。
+6. ラーメン系統について検索結果に十分な情報がない場合は、
+   勝手に系統を断定しないでください。
 
-7. Hot PepperとYahoo!の情報を組み合わせて、
-   店名、ジャンル、場所、予算、営業時間などを
-   分かりやすく整理してください。
+7. Hot PepperとYahoo!の情報を統合した
+   「Hot Pepper + Yahoo! 統合後の店舗検索結果」
+   を基本的な店舗候補として利用してください。
 
-8. ユーザーが予算を指定している場合は、
-   予算に合う店を優先してください。
+8. 同じ店舗がHot PepperとYahoo!の両方に存在する場合は、
+   1店舗として扱ってください。
 
-9. ユーザーが人数を指定している場合は、
-   その人数で利用しやすい店を優先してください。
+9. 「情報元」が
+   「Hot Pepper + Yahoo!」となっている店舗は、
+   複数の検索元で確認できた店舗として扱ってください。
 
-10. ユーザーが昼・夜など利用時間を指定している場合は、
-    その時間帯に利用しやすい店を優先してください。
-
-11. Tavilyで閉店と判断された店舗は、
+10. Tavilyで「closed」と判断された店舗は、
+    統合後の候補から除外されています。
     絶対に候補として表示しないでください。
 
-12. Tavilyで確認できない場合は、
-    勝手に営業中・閉店などと断定しないでください。
+11. Tavilyで「unknown」の店舗については、
+    営業中・閉店のどちらかを勝手に断定しないでください。
+
+12. Tavilyで「open」と判断された店舗についても、
+    検索結果に存在しない情報を追加しないでください。
 
 13. 検索結果に存在しない情報を勝手に作らないでください。
 
-14. 条件に合う店が少ない場合は、
+14. ユーザーが人数を指定している場合は、
+    その人数で利用しやすい店を優先してください。
+
+15. ユーザーが昼・夜など利用時間を指定している場合は、
+    その時間帯に利用しやすい店を優先してください。
+
+16. Yahoo!検索結果の「距離」が存在する場合は、
+    駅からの近さを候補選定の参考にしてください。
+
+17. Hot PepperとYahoo!の情報が両方存在する場合は、
+    情報を組み合わせて分かりやすく説明してください。
+
+18. 条件に合う店が少ない場合は、
     無理に条件に合うと断定せず、
     「条件に近い候補」として正直に説明してください。
 
-15. 店舗候補は見やすく整理してください。
+19. 店舗候補は見やすく整理してください。
 
-16. 最後に、ユーザーが指定した条件を
-    簡潔に確認しても構いません。
+20. 特に条件に合いそうな店舗を優先してください。
 
-17. 検索結果にURLがある場合は、
-    可能な範囲で店舗URLも提示してください。
-
-18. 回答はLINEで読みやすいように、
-    長くなりすぎないようにしてください。
-
-19. 店舗情報を紹介するときは、
-    「店名」「おすすめ理由」「予算・特徴」
+21. 店舗情報を紹介するときは、
+    「店名」「おすすめ理由」「特徴」
     が分かりやすい構成にしてください。
 
-20. 検索結果が複数ある場合は、
-    特に条件に合いそうな店舗を優先してください。
+22. 検索結果にURLがある場合は、
+    可能な範囲で店舗URLも提示してください。
+
+23. 回答はLINEで読みやすいように、
+    長くなりすぎないようにしてください。
+
+24. 店舗数を水増しするために、
+    検索結果にない店舗を追加しないでください。
+
+25. 予算を条件として勝手に設定しないでください。
+    店舗の価格情報が検索結果に存在する場合でも、
+    価格だけを理由に候補から除外しないでください。
 """
 
     return prompt
@@ -1747,6 +2628,7 @@ def ask_gemini(prompt):
     }
 
     try:
+
         response = requests.post(
             GEMINI_URL,
             headers=headers,
@@ -1756,6 +2638,7 @@ def ask_gemini(prompt):
         )
 
         if response.status_code != 200:
+
             print(
                 "Gemini HTTP:",
                 response.status_code,
@@ -1805,10 +2688,12 @@ def ask_gemini(prompt):
         return result
 
     except Exception as e:
+
         print(
             "Gemini APIエラー:",
             e,
         )
+
         return None
 
 
@@ -1843,6 +2728,7 @@ def ask_groq(prompt):
     }
 
     try:
+
         response = requests.post(
             GROQ_URL,
             headers=headers,
@@ -1851,6 +2737,7 @@ def ask_groq(prompt):
         )
 
         if response.status_code != 200:
+
             print(
                 "Groq HTTP:",
                 response.status_code,
@@ -1888,10 +2775,12 @@ def ask_groq(prompt):
         return result.strip()
 
     except Exception as e:
+
         print(
             "Groq APIエラー:",
             e,
         )
+
         return None
 
 
@@ -1930,6 +2819,7 @@ def ask_openrouter(prompt):
     }
 
     try:
+
         response = requests.post(
             OPENROUTER_URL,
             headers=headers,
@@ -1938,6 +2828,7 @@ def ask_openrouter(prompt):
         )
 
         if response.status_code != 200:
+
             print(
                 "OpenRouter HTTP:",
                 response.status_code,
@@ -1975,10 +2866,12 @@ def ask_openrouter(prompt):
         return result.strip()
 
     except Exception as e:
+
         print(
             "OpenRouter APIエラー:",
             e,
         )
+
         return None
 
 
@@ -2013,50 +2906,44 @@ def ask_gourmet_ai(
         user_text,
     )
 
-    # =====================================================
-    # ① Groqを最優先
-    # =====================================================
-
     answer = ask_groq(
         prompt
     )
 
     if answer:
+
         print(
             "AI回答: Groq"
         )
+
         return clean_answer(
             answer
         )
-
-    # =====================================================
-    # ② Groq失敗 → Gemini
-    # =====================================================
 
     answer = ask_gemini(
         prompt
     )
 
     if answer:
+
         print(
             "AI回答: Gemini"
         )
+
         return clean_answer(
             answer
         )
-
-    # =====================================================
-    # ③ Groq・Gemini両方失敗 → OpenRouter
-    # =====================================================
 
     answer = ask_openrouter(
         prompt
     )
 
     if answer:
+
         print(
             "AI回答: OpenRouter"
         )
+
         return clean_answer(
             answer
         )
@@ -2066,6 +2953,7 @@ def ask_gourmet_ai(
         "現在、グルメ検索AIに接続できませんでした。"
         "少し時間を置いてもう一度試してください。"
     )
+
 
 # =========================================================
 # 検索フロー
@@ -2080,12 +2968,17 @@ def start_search_flow(
     )
 
     state["step"] = "location"
+    state["location"] = ""
+    state["genre"] = ""
+    state["ramen_style"] = ""
+    state["people"] = ""
+    state["time"] = ""
 
     reply_text(
         reply_token,
-        "どの駅の周辺で探しますか？",
-        build_quick_reply(
-            LOCATION_OPTIONS
+        (
+            "お店を探したい駅名を入力してください。\n"
+            "例：町田駅、新宿駅、京王堀之内駅"
         ),
     )
 
@@ -2110,24 +3003,63 @@ def handle_search_selection(
 
     if step == "location":
 
-        if user_text not in LOCATION_OPTIONS:
+        location = normalize_text(
+            user_text
+        )
+
+        if not location:
 
             reply_text(
                 reply_token,
-                "駅を選択してください。",
-                build_quick_reply(
-                    LOCATION_OPTIONS
+                (
+                    "駅名を入力してください。\n"
+                    "例：町田駅、新宿駅、京王堀之内駅"
                 ),
             )
 
             return
 
-        state["location"] = user_text
+        print(
+            f"駅名入力確認: {location}"
+        )
+
+        coordinates = (
+            get_yahoo_location_coordinates(
+                location
+            )
+        )
+
+        if not coordinates:
+
+            reply_text(
+                reply_token,
+                (
+                    f"「{location}」の駅を確認できませんでした。\n\n"
+                    "駅名をもう一度入力してください。\n"
+                    "例：町田駅、新宿駅、京王堀之内駅"
+                ),
+            )
+
+            return
+
+        normalized_location = (
+            normalize_station_name(
+                location
+            )
+        )
+
+        state["location"] = (
+            normalized_location
+        )
+
         state["step"] = "genre"
 
         reply_text(
             reply_token,
-            "ジャンルは何にしますか？",
+            (
+                f"{normalized_location}ですね。\n"
+                "ジャンルは何にしますか？"
+            ),
             build_quick_reply(
                 GENRE_OPTIONS
             ),
@@ -2154,6 +3086,54 @@ def handle_search_selection(
             return
 
         state["genre"] = user_text
+
+        # ラーメンの場合だけ系統選択へ
+        if user_text == "ラーメン":
+
+            state["step"] = "ramen_style"
+
+            reply_text(
+                reply_token,
+                "ラーメンの系統はどうしますか？",
+                build_quick_reply(
+                    RAMEN_STYLE_OPTIONS
+                ),
+            )
+
+            return
+
+        state["ramen_style"] = ""
+        state["step"] = "people"
+
+        reply_text(
+            reply_token,
+            "何人で利用しますか？",
+            build_quick_reply(
+                PEOPLE_OPTIONS
+            ),
+        )
+
+        return
+
+    # =====================================================
+    # ラーメン系統
+    # =====================================================
+
+    if step == "ramen_style":
+
+        if user_text not in RAMEN_STYLE_OPTIONS:
+
+            reply_text(
+                reply_token,
+                "ラーメンの系統を選択してください。",
+                build_quick_reply(
+                    RAMEN_STYLE_OPTIONS
+                ),
+            )
+
+            return
+
+        state["ramen_style"] = user_text
         state["step"] = "people"
 
         reply_text(
@@ -2185,37 +3165,6 @@ def handle_search_selection(
             return
 
         state["people"] = user_text
-        state["step"] = "budget"
-
-        reply_text(
-            reply_token,
-            "予算はどれくらいですか？",
-            build_quick_reply(
-                BUDGET_OPTIONS
-            ),
-        )
-
-        return
-
-    # =====================================================
-    # 予算
-    # =====================================================
-
-    if step == "budget":
-
-        if user_text not in BUDGET_OPTIONS:
-
-            reply_text(
-                reply_token,
-                "予算を選択してください。",
-                build_quick_reply(
-                    BUDGET_OPTIONS
-                ),
-            )
-
-            return
-
-        state["budget"] = user_text
         state["step"] = "time"
 
         reply_text(
@@ -2307,10 +3256,6 @@ def handle_search_selection(
             )
 
             return
-
-        # =================================================
-        # AI検索
-        # =================================================
 
         search_text = (
             build_confirmation_text(
@@ -2603,8 +3548,6 @@ def callback():
 
         if user_id not in search_states:
 
-            # 店検索系のメッセージなら
-            # 検索フロー開始
             if should_search_hotpepper(
                 user_text
             ):
@@ -2613,47 +3556,24 @@ def callback():
                     "step": "location",
                     "location": "",
                     "genre": "",
+                    "ramen_style": "",
                     "people": "",
-                    "budget": "",
                     "time": "",
                 }
 
-                # すでに駅が入力されている場合
-                # そのまま次へ進める
-                selected_location = ""
-
-                for option in LOCATION_OPTIONS:
-
-                    if option in user_text:
-                        selected_location = option
-                        break
-
-                if selected_location:
-
-                    state = search_states[
-                        user_id
-                    ]
-
-                    state["location"] = (
-                        selected_location
-                    )
-
-                    state["step"] = "genre"
-
-                    reply_text(
-                        event.reply_token,
-                        "ジャンルは何にしますか？",
-                        build_quick_reply(
-                            GENRE_OPTIONS
-                        ),
-                    )
-
-                else:
+                if user_text == "開始":
 
                     start_search_flow(
                         event.reply_token,
                         user_id,
                     )
+
+                    continue
+
+                start_search_flow(
+                    event.reply_token,
+                    user_id,
+                )
 
                 continue
 
@@ -2731,6 +3651,15 @@ if __name__ == "__main__":
     print(
         "Yahoo!駅座標: "
         "Yahoo APIから自動取得"
+    )
+
+    print(
+        "検索条件: "
+        "駅・ジャンル・ラーメン系統・人数・利用時間"
+    )
+
+    print(
+        "予算条件: 無効"
     )
 
     print("=" * 50)
