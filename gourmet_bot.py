@@ -320,6 +320,685 @@ def parse_coordinates(coordinates):
         return None
 
 
+
+def calculate_distance_meters(
+    latitude1,
+    longitude1,
+    latitude2,
+    longitude2,
+):
+    try:
+        lat1 = math.radians(float(latitude1))
+        lon1 = math.radians(float(longitude1))
+        lat2 = math.radians(float(latitude2))
+        lon2 = math.radians(float(longitude2))
+    except Exception:
+        return None
+
+    earth_radius = 6371000
+
+    delta_lat = lat2 - lat1
+    delta_lon = lon2 - lon1
+
+    a = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1)
+        * math.cos(lat2)
+        * math.sin(delta_lon / 2) ** 2
+    )
+
+    c = 2 * math.atan2(
+        math.sqrt(a),
+        math.sqrt(1 - a),
+    )
+
+    return earth_radius * c
+
+
+def get_shop_distance_from_station(
+    shop,
+    station_coordinates,
+):
+    distance_value = shop.get(
+        "distance",
+        "",
+    )
+
+    if distance_value not in ("", None):
+        try:
+            if isinstance(
+                distance_value,
+                (int, float),
+            ):
+                return float(distance_value)
+
+            text = str(distance_value)
+
+            number_match = re.search(
+                r"[-+]?\d+(?:\.\d+)?",
+                text,
+            )
+
+            if number_match:
+                return float(
+                    number_match.group(0)
+                )
+
+        except Exception:
+            pass
+
+    shop_coordinates = get_shop_coordinates(shop)
+
+    if (
+        not shop_coordinates
+        or not station_coordinates
+    ):
+        return None
+
+    shop_latitude, shop_longitude = shop_coordinates
+    station_latitude, station_longitude = station_coordinates
+
+    return calculate_distance_meters(
+        station_latitude,
+        station_longitude,
+        shop_latitude,
+        shop_longitude,
+    )
+
+
+
+def extract_station_distance_from_web(text):
+    if not text:
+        return None
+
+    text = str(text)
+
+    meter_patterns = [
+        r"駅から\s*約?\s*(\d+(?:\.\d+)?)\s*(?:m|メートル)",
+        r"駅徒歩\s*(\d+(?:\.\d+)?)\s*(?:m|メートル)",
+        r"駅から\s*(\d+(?:\.\d+)?)\s*(?:m|メートル)",
+    ]
+
+    for pattern in meter_patterns:
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
+
+        if match:
+            try:
+                return float(match.group(1))
+            except Exception:
+                pass
+
+    walk_patterns = [
+        r"駅から\s*徒歩\s*(\d+(?:\.\d+)?)\s*分",
+        r"徒歩\s*(\d+(?:\.\d+)?)\s*分",
+    ]
+
+    for pattern in walk_patterns:
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
+
+        if match:
+            try:
+                minutes = float(match.group(1))
+                return minutes * 80
+            except Exception:
+                pass
+
+    return None
+
+
+
+def extract_possible_shop_name_from_title(title):
+    if not title:
+        return ""
+
+    value = normalize_text(str(title))
+
+    separators = [
+        " - ",
+        "｜",
+        "|",
+        "／",
+        "/",
+        " :: ",
+        "：",
+    ]
+
+    for separator in separators:
+        parts = [
+            part.strip()
+            for part in value.split(separator)
+            if part.strip()
+        ]
+
+        if len(parts) >= 2:
+            for part in parts:
+                if (
+                    "店" in part
+                    or "ラーメン" in part
+                    or "食堂" in part
+                    or "居酒屋" in part
+                    or "寿司" in part
+                    or "焼肉" in part
+                ):
+                    value = part
+                    break
+
+    quoted = re.search(
+        r"『([^』]+)』",
+        value,
+    )
+
+    if quoted:
+        value = quoted.group(1).strip()
+
+    value = re.sub(
+        r"^【[^】]+】\s*",
+        "",
+        value,
+    ).strip()
+
+    arrow_match = re.search(
+        r"駅\s*[→＞>]\s*(.+)$",
+        value,
+    )
+
+    if arrow_match:
+        value = arrow_match.group(1).strip()
+
+    map_match = re.search(
+        r"地図\s*[:：]\s*(.+)$",
+        value,
+    )
+
+    if map_match:
+        value = map_match.group(1).strip()
+
+    # 明らかなメニュー情報を店舗名として扱わない
+    menu_price_pattern = re.search(
+        r"\d+(?:\.\d+)?\s*円",
+        value,
+    )
+
+    menu_keyword_pattern = re.search(
+        r"(コール|トッピング|麺量|替え玉|大盛|小盛|中盛|大ラーメン|小ラーメン)",
+        value,
+    )
+
+    if menu_price_pattern and menu_keyword_pattern:
+        return ""
+
+    # 「小ラーメン 900円」のような価格付きメニューも除外
+    if (
+        menu_price_pattern
+        and "ラーメン" in value
+        and "店" not in value
+    ):
+        return ""
+
+    return value
+
+
+def build_tavily_discovery_queries(
+    location,
+    genre="",
+    ramen_style="",
+):
+    queries = []
+
+    base_parts = []
+
+    if location:
+        base_parts.append(str(location))
+
+    if genre:
+        base_parts.append(str(genre))
+
+    if ramen_style:
+        base_parts.append(str(ramen_style))
+
+    base_query = " ".join(base_parts).strip()
+
+    if base_query:
+        queries.append(
+            f"{base_query} 店舗"
+        )
+
+        queries.append(
+            f"{base_query} 食べログ"
+        )
+
+        queries.append(
+            f"{base_query} 公式"
+        )
+
+    return queries
+
+
+
+def search_web_shop_candidates(
+    location,
+    genre="",
+    ramen_style="",
+    max_results=5,
+):
+    queries = build_tavily_discovery_queries(
+        location=location,
+        genre=genre,
+        ramen_style=ramen_style,
+    )
+
+    candidates = []
+    seen_urls = set()
+    seen_names = []
+
+    skip_keywords = [
+        "ランキング",
+        "まとめ",
+        "おすすめ店",
+        "おすすめランキング",
+        "ラーメンランキング",
+        "飲食店ランキング",
+        "求人",
+        "アルバイト",
+        "ニュースまとめ",
+    ]
+
+    non_store_patterns = [
+        "駅周辺",
+        "駅で",
+        "周辺の",
+        "一覧",
+        "おすすめ",
+        "特集",
+        "まとめ",
+    ]
+
+    non_store_names = {
+        "Instagram",
+        "Facebook",
+        "YouTube",
+        "TikTok",
+        "Twitter",
+        "X",
+    }
+
+    for query in queries:
+        try:
+            results = search_tavily(query)
+
+            if not results:
+                continue
+
+            for result in results:
+                if not isinstance(result, dict):
+                    continue
+
+                title = str(
+                    result.get("title", "")
+                ).strip()
+
+                url = str(
+                    result.get("url", "")
+                ).strip()
+
+                content = str(
+                    result.get("content", "")
+                ).strip()
+
+                if not url:
+                    continue
+
+                normalized_url = url.rstrip("/")
+
+                if normalized_url in seen_urls:
+                    continue
+
+                seen_urls.add(normalized_url)
+
+                combined_text = (
+                    title
+                    + "\n"
+                    + content
+                )
+
+                if any(
+                    keyword in combined_text
+                    for keyword in skip_keywords
+                ):
+                    print(
+                        f"    Web候補除外（まとめ等）: {title}"
+                    )
+                    continue
+
+                if any(
+                    pattern in title
+                    for pattern in non_store_patterns
+                ):
+                    print(
+                        f"    Web候補除外（店舗一覧等）: {title}"
+                    )
+                    continue
+
+                shop_name = (
+                    extract_possible_shop_name_from_title(
+                        title
+                    )
+                )
+
+                if not shop_name:
+                    continue
+
+                if (
+                    shop_name.strip()
+                    in non_store_names
+                ):
+                    print(
+                        f"    Web候補除外（店舗名ではない）: {shop_name}"
+                    )
+                    continue
+
+                duplicate = False
+
+                for existing_name in seen_names:
+                    if shop_names_are_similar(
+                        shop_name,
+                        existing_name,
+                    ):
+                        duplicate = True
+                        break
+
+                if duplicate:
+                    continue
+
+                distance = (
+                    extract_station_distance_from_web(
+                        combined_text
+                    )
+                )
+
+                candidate = {
+                    "name": shop_name,
+                    "title": title,
+                    "url": url,
+                    "content": content,
+                    "distance": distance,
+                    "source": "Tavily Web",
+                    "address": "",
+                    "station": "",
+                    "tel": "",
+                    "latitude": "",
+                    "longitude": "",
+                    "genre": genre,
+                }
+
+                candidates.append(candidate)
+                seen_names.append(shop_name)
+
+                print(
+                    f"    Web候補: {shop_name} "
+                    f"距離={distance}"
+                )
+
+                if len(candidates) >= max_results:
+                    return candidates
+
+        except Exception as e:
+            print(
+                f"    Web店舗発掘エラー: {e}"
+            )
+
+    return candidates
+
+
+
+def enrich_web_candidate_with_yahoo(
+    shop,
+    location,
+):
+    if not shop:
+        return shop
+
+    shop_name = str(
+        shop.get("name", "")
+    ).strip()
+
+    if not shop_name:
+        return shop
+
+    queries = [
+        f"{location} {shop_name}",
+        shop_name,
+    ]
+
+    selected = None
+
+    for query in queries:
+        try:
+            results = search_yahoo_local_keyword(
+                query
+            )
+        except Exception as e:
+            print(
+                f"    Yahoo補完エラー: {e}"
+            )
+            continue
+
+        if not results:
+            continue
+
+        for result in results:
+            result_name = str(
+                result.get("name", "")
+            ).strip()
+
+            if shop_names_are_similar(
+                shop_name,
+                result_name,
+            ):
+                selected = result
+                break
+
+        if selected:
+            break
+
+        if results:
+            selected = results[0]
+            break
+
+    if not selected:
+        print(
+            f"    Yahoo補完候補なし: {shop_name}"
+        )
+        return shop
+
+    for key in [
+        "address",
+        "station",
+        "tel",
+        "latitude",
+        "longitude",
+        "genre",
+    ]:
+        if not shop.get(key):
+            value = selected.get(key, "")
+            if value:
+                shop[key] = value
+
+    if not shop.get("distance"):
+        distance = selected.get(
+            "distance",
+            "",
+        )
+
+        if distance not in ("", None):
+            shop["distance"] = distance
+
+    print(
+        f"    Yahoo補完: {shop_name}"
+    )
+
+    return shop
+
+
+
+def enrich_web_candidates_with_yahoo(
+    shops,
+    location,
+):
+    if not shops:
+        return []
+
+    enriched = []
+
+    for shop in shops:
+        try:
+            enriched_shop = (
+                enrich_web_candidate_with_yahoo(
+                    shop,
+                    location,
+                )
+            )
+            enriched.append(enriched_shop)
+        except Exception as e:
+            print(
+                f"    Yahoo一括補完エラー: {e}"
+            )
+            enriched.append(shop)
+
+        time.sleep(0.2)
+
+    return enriched
+
+
+
+def merge_web_shop_results(
+    existing_shops,
+    web_shops,
+):
+    merged = list(existing_shops or [])
+
+    for web_shop in web_shops or []:
+        if not web_shop:
+            continue
+
+        matched_shop = None
+
+        for existing_shop in merged:
+            if shops_are_same_store(
+                existing_shop,
+                web_shop,
+            ):
+                matched_shop = existing_shop
+                break
+
+        if matched_shop:
+            for key in [
+                "address",
+                "station",
+                "tel",
+                "latitude",
+                "longitude",
+                "genre",
+            ]:
+                if not matched_shop.get(key):
+                    value = web_shop.get(
+                        key,
+                        "",
+                    )
+                    if value:
+                        matched_shop[key] = value
+
+            web_url = web_shop.get(
+                "url",
+                "",
+            )
+
+            if web_url:
+                matched_shop["web_url"] = web_url
+
+            web_content = web_shop.get(
+                "content",
+                "",
+            )
+
+            if web_content:
+                matched_shop["web_content"] = (
+                    web_content
+                )
+
+            if not matched_shop.get("distance"):
+                distance = web_shop.get(
+                    "distance",
+                    "",
+                )
+                if distance not in ("", None):
+                    matched_shop["distance"] = distance
+
+        else:
+            new_shop = dict(web_shop)
+            new_shop["source"] = "Tavily Web"
+            merged.append(new_shop)
+
+    return merged
+
+
+
+def filter_shops_by_station_distance(
+    shops,
+    station_coordinates,
+    max_distance_meters=1000,
+):
+    if not shops:
+        return []
+
+    if not station_coordinates:
+        return shops
+
+    filtered = []
+
+    for shop in shops:
+        distance = get_shop_distance_from_station(
+            shop,
+            station_coordinates,
+        )
+
+        if distance is None:
+            shop["station_distance"] = None
+            shop["station_distance_status"] = (
+                "unknown"
+            )
+            filtered.append(shop)
+            continue
+
+        shop["station_distance"] = distance
+
+        if distance <= max_distance_meters:
+            shop["station_distance_status"] = (
+                "within"
+            )
+            filtered.append(shop)
+        else:
+            shop["station_distance_status"] = (
+                "outside"
+            )
+
+            print(
+                f"    距離フィルター除外: "
+                f"{shop.get('name', '')} "
+                f"{distance:.0f}m"
+            )
+
+    return filtered
+
+
 def get_shop_coordinates(shop):
     """
     店舗データから緯度経度を取得する。
@@ -1049,6 +1728,101 @@ def _contains_any(
     )
 
 
+def build_tavily_relevant_text(results, shop_name):
+    """
+    Tavily検索結果から、店舗名に関連する部分だけを抽出する。
+
+    完全一致だけでは表記揺れに弱いため、
+    店舗名から主要部分を抽出して関連情報を判定する。
+    """
+
+    if not results or not shop_name:
+        return ""
+
+    normalized_name = normalize_text(
+        shop_name
+    )
+
+    # SNS表記や括弧内の補足を除去
+    core_name = re.split(
+        r"[@（(【\[]",
+        normalized_name,
+        maxsplit=1,
+    )[0].strip()
+
+    # 「ラーメン」「らーめん」「麺」などの一般的な接頭語を除去
+    core_name = re.sub(
+        r"^(ラーメン|らーめん|ramen)",
+        "",
+        core_name,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    # 短すぎる場合は元の店舗名を使う
+    if len(core_name) < 3:
+        core_name = normalized_name
+
+    relevant_parts = []
+
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+
+        title = str(
+            result.get("title", "")
+        )
+
+        content = str(
+            result.get("content", "")
+        )
+
+        text = (
+            title
+            + "\n"
+            + content
+        )
+
+        normalized_text = normalize_text(
+            text
+        )
+
+        # 店舗名完全一致
+        matched_name = normalized_name
+
+        if normalized_name in normalized_text:
+            position = normalized_text.find(
+                normalized_name
+            )
+
+        # 店舗名主要部分一致
+        elif core_name in normalized_text:
+            matched_name = core_name
+            position = normalized_text.find(
+                core_name
+            )
+
+        else:
+            continue
+
+        start_pos = max(
+            0,
+            position - 500,
+        )
+
+        end_pos = min(
+            len(text),
+            position + len(matched_name) + 500,
+        )
+
+        relevant_parts.append(
+            text[start_pos:end_pos]
+        )
+
+    return "\n".join(
+        relevant_parts
+    )
+
+
 def check_shop_with_tavily(shop):
     """
     Tavilyを使って店舗の営業状況を確認する。
@@ -1092,8 +1866,9 @@ def check_shop_with_tavily(shop):
             "reason": "",
         }
 
-    combined = _build_tavily_shop_text(
-        results
+    combined = build_tavily_relevant_text(
+        results,
+        name,
     )
 
     if not combined:
@@ -2397,6 +3172,25 @@ def build_gourmet_prompt(
     user_id,
     user_text,
 ):
+    state = get_search_state(
+        user_id
+    )
+
+    location = state.get(
+        "location",
+        ""
+    )
+
+    genre = state.get(
+        "genre",
+        ""
+    )
+
+    ramen_style = state.get(
+        "ramen_style",
+        ""
+    )
+
     hotpepper_results = []
     yahoo_results = []
     merged_results = []
@@ -2436,7 +3230,67 @@ def build_gourmet_prompt(
         )
 
         # =================================================
-        # ④ 統合後にTavily確認
+        # ④ Tavily Web店舗発掘
+        # =================================================
+
+        web_results = search_web_shop_candidates(
+            location=location,
+            genre=genre,
+            ramen_style=ramen_style,
+            max_results=5,
+        )
+
+        print(
+            f"Tavily Web店舗発掘: "
+            f"{len(web_results)}件"
+        )
+
+        # =================================================
+        # ⑤ Web候補をYahoo!で補完
+        # =================================================
+
+        web_results = enrich_web_candidates_with_yahoo(
+            web_results,
+            location,
+        )
+
+        # =================================================
+        # ⑥ Hot Pepper + Yahoo! + Web 統合
+        # =================================================
+
+        merged_results = merge_web_shop_results(
+            merged_results,
+            web_results,
+        )
+
+        print(
+            f"Web統合後: "
+            f"{len(merged_results)}件"
+        )
+
+        # =================================================
+        # ⑦ 駅から1000m以内に絞り込み
+        # =================================================
+
+        station_coordinates = (
+            get_yahoo_location_coordinates(
+                location
+            )
+        )
+
+        merged_results = filter_shops_by_station_distance(
+            merged_results,
+            station_coordinates,
+            max_distance_meters=1000,
+        )
+
+        print(
+            f"1000m距離フィルター後: "
+            f"{len(merged_results)}件"
+        )
+
+        # =================================================
+        # ⑧ 統合後にTavily確認
         # =================================================
 
         print(
@@ -2803,7 +3657,7 @@ def ask_openrouter(prompt):
         "HTTP-Referer": (
             "https://ai-ayafumi-gourmet.onrender.com"
         ),
-        "X-Title": "AIアヤフミ（グルメ）",
+        "X-Title": "AI-Ayafumi-Gourmet",
     }
 
     payload = {
