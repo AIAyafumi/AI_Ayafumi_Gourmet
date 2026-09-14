@@ -43,6 +43,10 @@ OPENROUTER_API_KEY = os.getenv(
     "OPENROUTER_API_KEY"
 )
 
+TAVILY_API_KEY = os.getenv(
+    "TAVILY_API_KEY"
+)
+
 
 # ============================================================
 # API URL
@@ -59,6 +63,10 @@ GROQ_URL = (
 
 OPENROUTER_URL = (
     "https://openrouter.ai/api/v1/chat/completions"
+)
+
+TAVILY_URL = (
+    "https://api.tavily.com/search"
 )
 
 
@@ -298,6 +306,257 @@ def post_with_retry(
 
 
 # ============================================================
+# Tavily Web検索
+# ============================================================
+
+def search_tavily(
+    query
+):
+
+    print(
+        "Tavily検索開始：",
+        query
+    )
+
+    if not TAVILY_API_KEY:
+
+        print(
+            "TAVILY_API_KEY が設定されていません。"
+        )
+
+        return []
+
+    data = {
+
+        "api_key":
+            TAVILY_API_KEY,
+
+        "query":
+            query,
+
+        "search_depth":
+            "basic",
+
+        "topic":
+            "general",
+
+        "max_results":
+            5,
+
+        "include_answer":
+            False,
+
+        "include_raw_content":
+            False
+
+    }
+
+    try:
+
+        response = post_with_retry(
+            TAVILY_URL,
+            headers={
+                "Content-Type":
+                    "application/json"
+            },
+            json=data,
+            timeout=30,
+            retries=1
+        )
+
+    except Exception as e:
+
+        print(
+            "Tavily通信エラー：",
+            e
+        )
+
+        return []
+
+    print(
+        "Tavily HTTPステータス：",
+        response.status_code
+    )
+
+    if response.status_code >= 400:
+
+        print(
+            "Tavily HTTPエラー："
+        )
+
+        print(
+            response.text[:3000]
+        )
+
+        return []
+
+    try:
+
+        result = response.json()
+
+    except ValueError:
+
+        print(
+            "TavilyレスポンスがJSONではありません。"
+        )
+
+        return []
+
+    results = result.get(
+        "results",
+        []
+    )
+
+    print(
+        "Tavily検索件数：",
+        len(results)
+    )
+
+    return results
+
+
+# ============================================================
+# Tavily検索が必要か判定
+# ============================================================
+
+def should_search_tavily(
+    user_text
+):
+
+    keywords = [
+
+        "店",
+        "店舗",
+        "レストラン",
+        "飲食店",
+        "食事",
+        "グルメ",
+        "ラーメン",
+        "つけ麺",
+        "そば",
+        "うどん",
+        "寿司",
+        "すし",
+        "焼肉",
+        "焼き肉",
+        "居酒屋",
+        "焼き鳥",
+        "カレー",
+        "中華",
+        "イタリアン",
+        "フレンチ",
+        "ハンバーグ",
+        "とんかつ",
+        "天ぷら",
+        "しゃぶしゃぶ",
+        "ステーキ",
+        "ピザ",
+        "パスタ",
+        "閉店",
+        "営業",
+        "営業時間",
+        "予約",
+        "おすすめ",
+        "人気",
+        "近く",
+        "近所",
+        "堀之内",
+        "南大沢",
+        "八王子",
+        "多摩",
+        "聖蹟桜ヶ丘"
+
+    ]
+
+    return any(
+        keyword in user_text
+        for keyword in keywords
+    )
+
+
+# ============================================================
+# Tavily検索結果をAI用テキストに変換
+# ============================================================
+
+def format_tavily_results(
+    results
+):
+
+    if not results:
+
+        return (
+            "今回のWeb検索では、"
+            "有力な情報を取得できませんでした。"
+        )
+
+    lines = []
+
+    for index, result in enumerate(
+        results,
+        start=1
+    ):
+
+        title = result.get(
+            "title",
+            ""
+        )
+
+        url = result.get(
+            "url",
+            ""
+        )
+
+        content = result.get(
+            "content",
+            ""
+        )
+
+        lines.append(
+            f"{index}. {title}\n"
+            f"URL: {url}\n"
+            f"内容: {content}"
+        )
+
+    return "\n\n".join(
+        lines
+    )
+
+
+# ============================================================
+# レストラン情報のWeb検索
+# ============================================================
+
+def get_tavily_context(
+    user_text
+):
+
+    if not should_search_tavily(
+        user_text
+    ):
+
+        return ""
+
+    # --------------------------------------------------------
+    # 検索クエリ
+    # --------------------------------------------------------
+
+    query = (
+        user_text
+        + " 店舗 営業 閉店 最新情報"
+    )
+
+    results = search_tavily(
+        query
+    )
+
+    formatted = format_tavily_results(
+        results
+    )
+
+    return formatted
+
+
+# ============================================================
 # AI用プロンプト作成
 # ============================================================
 
@@ -316,6 +575,18 @@ def build_gourmet_prompt(
         )
     )
 
+    # --------------------------------------------------------
+    # Tavily Web検索
+    # --------------------------------------------------------
+
+    tavily_context = get_tavily_context(
+        user_text
+    )
+
+    # --------------------------------------------------------
+    # プロンプト作成
+    # --------------------------------------------------------
+
     prompt = (
         system_prompt
 
@@ -326,11 +597,51 @@ def build_gourmet_prompt(
         + "\n\n"
         + "【今回のユーザー依頼】\n"
         + user_text
+    )
 
-        + "\n\n"
+    # --------------------------------------------------------
+    # Tavily検索結果がある場合
+    # --------------------------------------------------------
+
+    if tavily_context:
+
+        prompt += (
+
+            "\n\n"
+            + "【Web検索による最新情報】\n"
+            + tavily_context
+
+            + "\n\n"
+
+            + "【Web情報の利用ルール】\n"
+
+            + "上記のWeb検索結果は、"
+            + "店舗の営業状況、閉店情報、"
+            + "営業時間、店舗情報などを"
+            + "確認するための参考情報です。"
+
+            + "特に閉店・移転・営業終了などの情報が"
+            + "見つかった場合は重要視してください。"
+
+            + "ユーザーに店舗をおすすめする場合、"
+            + "閉店した店舗を営業中の店舗として"
+            + "おすすめしないでください。"
+
+            + "Web検索結果だけで断定できない場合は、"
+            + "断定を避けてください。"
+
+            + "Web検索結果とユーザーの依頼を踏まえて、"
+            + "現在利用できる可能性が高い店舗を"
+            + "優先してください。"
+        )
+
+    prompt += (
+
+        "\n\n"
         + "【回答】\n"
         + "過去の会話を踏まえて、"
         + "今回のユーザーの発言に直接答えてください。"
+
         + "すでにユーザーが答えた情報を、"
         + "もう一度質問しないでください。"
     )
@@ -1189,4 +1500,4 @@ if __name__ == "__main__":
                 5000
             )
         )
-    )
+    )it
