@@ -98,6 +98,41 @@ SYSTEM_PROMPT_FILE = os.path.join(
 
 
 # ============================================================
+# 会話履歴
+# ============================================================
+
+# ユーザーごとの会話履歴を保存する
+#
+# 形式：
+#
+# conversation_histories = {
+#     "ユーザーID": [
+#         {
+#             "role": "user",
+#             "content": "魚が食べたい"
+#         },
+#         {
+#             "role": "assistant",
+#             "content": "どのエリアで探しますか？"
+#         }
+#     ]
+# }
+#
+# Renderが再起動するとメモリ上の履歴は消える。
+# 将来的にRedisなどを使えば永続化できる。
+
+conversation_histories = {}
+
+
+# ============================================================
+# 会話履歴の最大保持数
+# ============================================================
+
+# 10往復 = ユーザー10回 + AI10回
+MAX_HISTORY_MESSAGES = 20
+
+
+# ============================================================
 # システムプロンプト読み込み
 # ============================================================
 
@@ -126,6 +161,98 @@ def load_gourmet_system_prompt():
         )
 
     return prompt
+
+
+# ============================================================
+# 会話履歴取得
+# ============================================================
+
+def get_conversation_history(
+    user_id
+):
+
+    if user_id not in conversation_histories:
+
+        conversation_histories[user_id] = []
+
+    return conversation_histories[user_id]
+
+
+# ============================================================
+# 会話履歴追加
+# ============================================================
+
+def add_conversation_message(
+    user_id,
+    role,
+    content
+):
+
+    history = get_conversation_history(
+        user_id
+    )
+
+    history.append(
+        {
+            "role": role,
+            "content": content
+        }
+    )
+
+    # 古い履歴を削除
+    if len(history) > MAX_HISTORY_MESSAGES:
+
+        conversation_histories[user_id] = (
+            history[-MAX_HISTORY_MESSAGES:]
+        )
+
+
+# ============================================================
+# 会話履歴をテキスト化
+# ============================================================
+
+def format_conversation_history(
+    user_id
+):
+
+    history = get_conversation_history(
+        user_id
+    )
+
+    if not history:
+
+        return "まだ過去の会話はありません。"
+
+    lines = []
+
+    for message in history:
+
+        role = message.get(
+            "role"
+        )
+
+        content = message.get(
+            "content",
+            ""
+        )
+
+        if role == "user":
+
+            lines.append(
+                "ユーザー："
+                + content
+            )
+
+        elif role == "assistant":
+
+            lines.append(
+                "AI："
+                + content
+            )
+
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -175,6 +302,7 @@ def post_with_retry(
 # ============================================================
 
 def build_gourmet_prompt(
+    user_id,
     user_text
 ):
 
@@ -182,12 +310,29 @@ def build_gourmet_prompt(
         load_gourmet_system_prompt()
     )
 
+    conversation_history = (
+        format_conversation_history(
+            user_id
+        )
+    )
+
     prompt = (
         system_prompt
-        + "\n\n【今回のユーザー依頼】\n"
+
+        + "\n\n"
+        + "【過去の会話】\n"
+        + conversation_history
+
+        + "\n\n"
+        + "【今回のユーザー依頼】\n"
         + user_text
-        + "\n\n【回答】\n"
-        + "ユーザーの依頼に直接答えてください。"
+
+        + "\n\n"
+        + "【回答】\n"
+        + "過去の会話を踏まえて、"
+        + "今回のユーザーの発言に直接答えてください。"
+        + "すでにユーザーが答えた情報を、"
+        + "もう一度質問しないでください。"
     )
 
     print(
@@ -691,6 +836,7 @@ def clean_answer(
 # ============================================================
 
 def ask_gourmet_ai(
+    user_id,
     user_text
 ):
 
@@ -699,13 +845,34 @@ def ask_gourmet_ai(
         user_text
     )
 
+    print(
+        "会話ユーザーID：",
+        user_id
+    )
+
+    # --------------------------------------------------------
+    # 現在の履歴を確認
+    # --------------------------------------------------------
+
+    history = get_conversation_history(
+        user_id
+    )
+
+    print(
+        "現在の会話履歴件数：",
+        len(history)
+    )
+
     # --------------------------------------------------------
     # プロンプト作成
     # --------------------------------------------------------
 
     prompt = build_gourmet_prompt(
+        user_id,
         user_text
     )
+
+    answer = None
 
     # --------------------------------------------------------
     # 1. Groq
@@ -715,10 +882,6 @@ def ask_gourmet_ai(
 
         answer = ask_groq(
             prompt
-        )
-
-        return clean_answer(
-            answer
         )
 
     except Exception as e:
@@ -732,53 +895,82 @@ def ask_gourmet_ai(
     # 2. Gemini
     # --------------------------------------------------------
 
-    try:
+    if not answer:
 
-        answer = ask_gemini(
-            prompt
-        )
+        try:
 
-        return clean_answer(
-            answer
-        )
+            answer = ask_gemini(
+                prompt
+            )
 
-    except Exception as e:
+        except Exception as e:
 
-        print(
-            "Gemini失敗：",
-            e
-        )
+            print(
+                "Gemini失敗：",
+                e
+            )
 
     # --------------------------------------------------------
     # 3. OpenRouter
     # --------------------------------------------------------
 
-    try:
+    if not answer:
 
-        answer = ask_openrouter(
-            prompt
-        )
+        try:
 
-        return clean_answer(
-            answer
-        )
+            answer = ask_openrouter(
+                prompt
+            )
 
-    except Exception as e:
+        except Exception as e:
 
-        print(
-            "OpenRouter失敗：",
-            e
-        )
+            print(
+                "OpenRouter失敗：",
+                e
+            )
 
     # --------------------------------------------------------
     # 全API失敗
     # --------------------------------------------------------
 
-    return (
-        "申し訳ありません。"
-        "現在、グルメAIの処理に失敗しています。"
-        "少し時間をおいてもう一度試してください。"
+    if not answer:
+
+        return (
+            "申し訳ありません。"
+            "現在、グルメAIの処理に失敗しています。"
+            "少し時間をおいてもう一度試してください。"
+        )
+
+    answer = clean_answer(
+        answer
     )
+
+    # --------------------------------------------------------
+    # 会話履歴に追加
+    # --------------------------------------------------------
+
+    add_conversation_message(
+        user_id,
+        "user",
+        user_text
+    )
+
+    add_conversation_message(
+        user_id,
+        "assistant",
+        answer
+    )
+
+    print(
+        "会話履歴更新後の件数：",
+        len(
+            get_conversation_history(
+                user_id
+            )
+        )
+    )
+
+    return answer
 
 
 # ============================================================
@@ -855,9 +1047,16 @@ def test():
         user_text
     )
 
+    # --------------------------------------------------------
+    # PowerShellテスト用の固定ユーザーID
+    # --------------------------------------------------------
+
+    test_user_id = "powershell-test"
+
     try:
 
         answer = ask_gourmet_ai(
+            test_user_id,
             user_text
         )
 
@@ -932,14 +1131,26 @@ def callback():
             event.message.text
         )
 
+        # ----------------------------------------------------
+        # LINEユーザーID
+        # ----------------------------------------------------
+
+        user_id = event.source.user_id
+
         print(
             "LINE受信：",
             user_text
         )
 
+        print(
+            "LINEユーザーID：",
+            user_id
+        )
+
         try:
 
             answer = ask_gourmet_ai(
+                user_id,
                 user_text
             )
 
