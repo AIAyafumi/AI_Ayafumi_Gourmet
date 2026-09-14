@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import requests
 
 from flask import Flask, request, abort
@@ -1324,17 +1325,102 @@ def reply_to_line(
 )
 def test():
 
+    # --------------------------------------------------------
+    # Raw Bodyを取得
+    # --------------------------------------------------------
+
+    raw_body = request.get_data(
+        as_text=True
+    )
+
+    print(
+        "TEST Content-Type：",
+        request.content_type
+    )
+
+    print(
+        "TEST Raw Body：",
+        raw_body
+    )
+
+    print(
+        "TEST Request Headers：",
+        dict(request.headers)
+    )
+
+    # --------------------------------------------------------
+    # Flask標準のJSON解析
+    # --------------------------------------------------------
+
     data = request.get_json(
         silent=True
     )
 
-    if not data or "message" not in data:
+    print(
+        "TEST Parsed JSON：",
+        data
+    )
+
+    # --------------------------------------------------------
+    # Flaskで解析できなかった場合
+    # Raw Bodyから直接JSON解析
+    # --------------------------------------------------------
+
+    if data is None and raw_body:
+
+        try:
+
+            data = json.loads(
+                raw_body
+            )
+
+            print(
+                "TEST Manual JSON Parse：",
+                data
+            )
+
+        except json.JSONDecodeError as e:
+
+            print(
+                "TEST Manual JSON Parse Error：",
+                e
+            )
+
+            return {
+                "error": "JSON解析に失敗しました。",
+                "content_type": request.content_type,
+                "raw_body": raw_body,
+                "parse_error": str(e)
+            }, 400
+
+    # --------------------------------------------------------
+    # JSON自体が取得できなかった場合
+    # --------------------------------------------------------
+
+    if not data:
 
         return {
-            "error": "message が指定されていません。"
+            "error": "JSONを取得できませんでした。",
+            "content_type": request.content_type,
+            "raw_body": raw_body
+        }, 400
+
+    # --------------------------------------------------------
+    # message確認
+    # --------------------------------------------------------
+
+    if "message" not in data:
+
+        return {
+            "error": "message が指定されていません。",
+            "received_data": data
         }, 400
 
     user_text = data["message"]
+
+    # --------------------------------------------------------
+    # message型確認
+    # --------------------------------------------------------
 
     if not isinstance(
         user_text,
@@ -1344,6 +1430,10 @@ def test():
         return {
             "error": "message は文字列で指定してください。"
         }, 400
+
+    # --------------------------------------------------------
+    # 空白除去
+    # --------------------------------------------------------
 
     user_text = user_text.strip()
 
