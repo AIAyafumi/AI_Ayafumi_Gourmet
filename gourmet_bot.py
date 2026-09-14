@@ -12,10 +12,14 @@ from linebot.v3.messaging import (
     MessagingApi,
     ReplyMessageRequest,
     TextMessage,
+    QuickReply,
+    QuickReplyItem,
+    MessageAction,
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import Configuration
+
 
 # ============================================================
 # 環境変数
@@ -38,6 +42,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 HOTPEPPER_API_KEY = os.getenv("HOTPEPPER_API_KEY")
 
+
 # ============================================================
 # API URL
 # ============================================================
@@ -58,6 +63,7 @@ HOTPEPPER_URL = (
     "hotpepper/gourmet/v1/"
 )
 
+
 # ============================================================
 # LINE設定
 # ============================================================
@@ -70,11 +76,13 @@ parser = WebhookParser(
     GOURMET_LINE_CHANNEL_SECRET
 )
 
+
 # ============================================================
 # Flask
 # ============================================================
 
 app = Flask(__name__)
+
 
 # ============================================================
 # ファイルパス
@@ -90,6 +98,7 @@ SYSTEM_PROMPT_FILE = os.path.join(
     "gourmet_system_prompt.txt"
 )
 
+
 # ============================================================
 # 会話履歴
 # ============================================================
@@ -97,6 +106,77 @@ SYSTEM_PROMPT_FILE = os.path.join(
 conversation_histories = {}
 
 MAX_HISTORY_MESSAGES = 20
+
+
+# ============================================================
+# LINE検索状態
+#
+# ユーザーごとに
+#
+# 場所
+# ↓
+# ジャンル
+# ↓
+# 予算
+# ↓
+# 人数
+# ↓
+# 時間
+#
+# を保存する
+# ============================================================
+
+gourmet_search_states = {}
+
+
+# ============================================================
+# 選択肢
+# ============================================================
+
+LOCATION_OPTIONS = [
+    "京王堀之内駅",
+    "南大沢駅",
+    "多摩センター駅",
+    "八王子駅",
+    "聖蹟桜ヶ丘駅",
+    "その他",
+]
+
+GENRE_OPTIONS = [
+    "ラーメン",
+    "焼肉",
+    "寿司",
+    "居酒屋",
+    "焼き鳥",
+    "カレー",
+    "中華",
+    "イタリアン",
+    "その他",
+]
+
+BUDGET_OPTIONS = [
+    "～1,000円",
+    "1,000～1,500円",
+    "1,500～2,000円",
+    "2,000～3,000円",
+    "3,000円～",
+]
+
+PEOPLE_OPTIONS = [
+    "1人",
+    "2人",
+    "3人",
+    "4人",
+    "5人以上",
+]
+
+TIME_OPTIONS = [
+    "今から",
+    "ランチ",
+    "ディナー",
+    "時間指定なし",
+]
+
 
 # ============================================================
 # システムプロンプト読み込み
@@ -221,7 +301,419 @@ def format_conversation_history(
                 "AI：" + content
             )
 
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
+
+
+# ============================================================
+# 検索状態取得
+# ============================================================
+
+def get_gourmet_search_state(
+    user_id
+):
+
+    if user_id not in gourmet_search_states:
+
+        gourmet_search_states[
+            user_id
+        ] = {
+            "step": "location",
+            "location": "",
+            "genre": "",
+            "budget": "",
+            "people": "",
+            "time": ""
+        }
+
+    return gourmet_search_states[
+        user_id
+    ]
+
+
+# ============================================================
+# 検索状態リセット
+# ============================================================
+
+def reset_gourmet_search_state(
+    user_id
+):
+
+    gourmet_search_states[
+        user_id
+    ] = {
+        "step": "location",
+        "location": "",
+        "genre": "",
+        "budget": "",
+        "people": "",
+        "time": ""
+    }
+
+
+# ============================================================
+# LINE Quick Reply作成
+# ============================================================
+
+def build_quick_reply(
+    options
+):
+
+    return QuickReply(
+        items=[
+            QuickReplyItem(
+                action=MessageAction(
+                    label=option,
+                    text=option
+                )
+            )
+            for option in options
+        ]
+    )
+
+
+# ============================================================
+# LINE選択メッセージ送信
+# ============================================================
+
+def reply_to_line_with_quick_reply(
+    reply_token,
+    text,
+    options
+):
+
+    quick_reply = build_quick_reply(
+        options
+    )
+
+    with ApiClient(
+        configuration
+    ) as api_client:
+
+        messaging_api = MessagingApi(
+            api_client
+        )
+
+        messaging_api.reply_message(
+
+            ReplyMessageRequest(
+
+                reply_token=reply_token,
+
+                messages=[
+
+                    TextMessage(
+                        text=text,
+                        quick_reply=quick_reply
+                    )
+
+                ]
+            )
+        )
+
+
+# ============================================================
+# 通常LINE返信
+# ============================================================
+
+def reply_to_line(
+    reply_token,
+    text
+):
+
+    with ApiClient(
+        configuration
+    ) as api_client:
+
+        messaging_api = MessagingApi(
+            api_client
+        )
+
+        messaging_api.reply_message(
+
+            ReplyMessageRequest(
+
+                reply_token=reply_token,
+
+                messages=[
+
+                    TextMessage(
+                        text=text
+                    )
+
+                ]
+            )
+        )
+
+
+# ============================================================
+# LINE選択フロー
+# ============================================================
+
+def handle_line_selection(
+    user_id,
+    user_text
+):
+
+    state = get_gourmet_search_state(
+        user_id
+    )
+
+    step = state.get(
+        "step",
+        "location"
+    )
+
+    print(
+        "LINE選択フロー：",
+        step,
+        flush=True
+    )
+
+    print(
+        "LINE選択内容：",
+        user_text,
+        flush=True
+    )
+
+    # ========================================================
+    # 場所
+    # ========================================================
+
+    if step == "location":
+
+        if user_text not in LOCATION_OPTIONS:
+
+            return {
+                "handled": True,
+                "type": "quick_reply",
+                "text": (
+                    "📍 どこで探しますか？"
+                ),
+                "options": LOCATION_OPTIONS
+            }
+
+        state["location"] = user_text
+        state["step"] = "genre"
+
+        return {
+            "handled": True,
+            "type": "quick_reply",
+            "text": (
+                f"📍 {user_text}\n\n"
+                "🍴 ジャンルを選んでください"
+            ),
+            "options": GENRE_OPTIONS
+        }
+
+    # ========================================================
+    # ジャンル
+    # ========================================================
+
+    if step == "genre":
+
+        if user_text not in GENRE_OPTIONS:
+
+            return {
+                "handled": True,
+                "type": "quick_reply",
+                "text": (
+                    "🍴 ジャンルを選んでください"
+                ),
+                "options": GENRE_OPTIONS
+            }
+
+        state["genre"] = user_text
+        state["step"] = "budget"
+
+        return {
+            "handled": True,
+            "type": "quick_reply",
+            "text": (
+                f"🍴 {user_text}\n\n"
+                "💰 予算を選んでください"
+            ),
+            "options": BUDGET_OPTIONS
+        }
+
+    # ========================================================
+    # 予算
+    # ========================================================
+
+    if step == "budget":
+
+        if user_text not in BUDGET_OPTIONS:
+
+            return {
+                "handled": True,
+                "type": "quick_reply",
+                "text": (
+                    "💰 予算を選んでください"
+                ),
+                "options": BUDGET_OPTIONS
+            }
+
+        state["budget"] = user_text
+        state["step"] = "people"
+
+        return {
+            "handled": True,
+            "type": "quick_reply",
+            "text": (
+                f"💰 {user_text}\n\n"
+                "👥 何人ですか？"
+            ),
+            "options": PEOPLE_OPTIONS
+        }
+
+    # ========================================================
+    # 人数
+    # ========================================================
+
+    if step == "people":
+
+        if user_text not in PEOPLE_OPTIONS:
+
+            return {
+                "handled": True,
+                "type": "quick_reply",
+                "text": (
+                    "👥 何人ですか？"
+                ),
+                "options": PEOPLE_OPTIONS
+            }
+
+        state["people"] = user_text
+        state["step"] = "time"
+
+        return {
+            "handled": True,
+            "type": "quick_reply",
+            "text": (
+                f"👥 {user_text}\n\n"
+                "🕐 いつ利用しますか？"
+            ),
+            "options": TIME_OPTIONS
+        }
+
+    # ========================================================
+    # 時間
+    # ========================================================
+
+    if step == "time":
+
+        if user_text not in TIME_OPTIONS:
+
+            return {
+                "handled": True,
+                "type": "quick_reply",
+                "text": (
+                    "🕐 いつ利用しますか？"
+                ),
+                "options": TIME_OPTIONS
+            }
+
+        state["time"] = user_text
+        state["step"] = "complete"
+
+        # ----------------------------------------------------
+        # 全条件完成
+        # ----------------------------------------------------
+
+        search_text = build_structured_search_text(
+            state
+        )
+
+        print(
+            "========================================",
+            flush=True
+        )
+
+        print(
+            "LINE選択条件完成",
+            flush=True
+        )
+
+        print(
+            search_text,
+            flush=True
+        )
+
+        print(
+            "========================================",
+            flush=True
+        )
+
+        # 検索後に状態をリセット
+        reset_gourmet_search_state(
+            user_id
+        )
+
+        return {
+            "handled": True,
+            "type": "search",
+            "search_text": search_text
+        }
+
+    # ========================================================
+    # 想定外
+    # ========================================================
+
+    reset_gourmet_search_state(
+        user_id
+    )
+
+    return {
+        "handled": True,
+        "type": "quick_reply",
+        "text": (
+            "📍 どこで探しますか？"
+        ),
+        "options": LOCATION_OPTIONS
+    }
+
+
+# ============================================================
+# 選択された条件を検索用テキストへ変換
+# ============================================================
+
+def build_structured_search_text(
+    state
+):
+
+    location = state.get(
+        "location",
+        ""
+    )
+
+    genre = state.get(
+        "genre",
+        ""
+    )
+
+    budget = state.get(
+        "budget",
+        ""
+    )
+
+    people = state.get(
+        "people",
+        ""
+    )
+
+    time = state.get(
+        "time",
+        ""
+    )
+
+    return (
+        f"{location}で"
+        f"{genre}を探す。"
+        f"予算は{budget}。"
+        f"{people}で利用。"
+        f"利用時間は{time}。"
+    )
 
 
 # ============================================================
@@ -288,7 +780,6 @@ def should_search_hotpepper(
 
     keywords = [
 
-        # 店舗・検索系
         "店",
         "店舗",
         "レストラン",
@@ -297,11 +788,7 @@ def should_search_hotpepper(
         "探して",
         "探す",
         "おすすめ",
-        "近く",
-        "近所",
-        "人気",
 
-        # ジャンル
         "ラーメン",
         "つけ麺",
         "そば",
@@ -327,7 +814,6 @@ def should_search_hotpepper(
         "韓国料理",
         "餃子",
 
-        # エリア
         "堀之内",
         "南大沢",
         "八王子",
@@ -382,6 +868,53 @@ def build_hotpepper_keyword(
     ]
 
     for word in remove_words:
+
+        keyword = keyword.replace(
+            word,
+            " "
+        )
+
+    # 選択式フローから来る条件を除去
+    # Hot Pepper keywordには場所＋ジャンルを中心に渡す
+
+    budget_words = [
+        "～1,000円",
+        "1,000～1,500円",
+        "1,500～2,000円",
+        "2,000～3,000円",
+        "3,000円～"
+    ]
+
+    for word in budget_words:
+
+        keyword = keyword.replace(
+            word,
+            " "
+        )
+
+    people_words = [
+        "1人",
+        "2人",
+        "3人",
+        "4人",
+        "5人以上"
+    ]
+
+    for word in people_words:
+
+        keyword = keyword.replace(
+            word,
+            " "
+        )
+
+    time_words = [
+        "今から",
+        "ランチ",
+        "ディナー",
+        "時間指定なし"
+    ]
+
+    for word in time_words:
 
         keyword = keyword.replace(
             word,
@@ -608,10 +1141,6 @@ def check_hotpepper_shop_with_tavily(
             "reason": "Tavilyから確認情報を取得できませんでした。"
         }
 
-    # --------------------------------------------------------
-    # 検索結果をまとめる
-    # --------------------------------------------------------
-
     matched_texts = []
 
     for result in results:
@@ -636,7 +1165,6 @@ def check_hotpepper_shop_with_tavily(
             + content
         )
 
-        # 店舗名が含まれる検索結果を優先
         if name in text:
 
             matched_texts.append(
@@ -650,15 +1178,10 @@ def check_hotpepper_shop_with_tavily(
             "reason": "店舗名が一致するWeb情報を確認できませんでした。"
         }
 
-    # --------------------------------------------------------
-    # 店舗名一致結果だけを判定
-    # --------------------------------------------------------
-
     combined_text = "\n".join(
         matched_texts
     )
 
-    # 強い閉店表現
     strong_closed_phrases = [
 
         "閉店しました",
@@ -675,7 +1198,6 @@ def check_hotpepper_shop_with_tavily(
         "店を閉めました"
     ]
 
-    # 一般的な閉店表現
     normal_closed_phrases = [
 
         "閉店",
@@ -683,7 +1205,6 @@ def check_hotpepper_shop_with_tavily(
         "営業終了"
     ]
 
-    # 閉店ではないことを示す表現
     negative_closed_phrases = [
 
         "閉店していません",
@@ -695,7 +1216,6 @@ def check_hotpepper_shop_with_tavily(
         "営業終了してない"
     ]
 
-    # 営業中を示す表現
     open_phrases = [
 
         "現在営業中",
@@ -710,10 +1230,6 @@ def check_hotpepper_shop_with_tavily(
     closed_score = 0
     open_score = 0
 
-    # --------------------------------------------------------
-    # 閉店表現
-    # --------------------------------------------------------
-
     for phrase in strong_closed_phrases:
 
         if phrase in combined_text:
@@ -724,8 +1240,6 @@ def check_hotpepper_shop_with_tavily(
 
         if phrase in combined_text:
 
-            # 否定表現の近くにある可能性がある場合は
-            # 一般閉店スコアを加算しない
             is_negated = any(
                 negative in combined_text
                 for negative in negative_closed_phrases
@@ -735,28 +1249,16 @@ def check_hotpepper_shop_with_tavily(
 
                 closed_score += 1
 
-    # --------------------------------------------------------
-    # 営業中表現
-    # --------------------------------------------------------
-
     for phrase in open_phrases:
 
         if phrase in combined_text:
 
             open_score += 2
 
-    # --------------------------------------------------------
-    # 判定
-    # --------------------------------------------------------
-
     if (
         closed_score >= 3
         and closed_score > open_score
     ):
-
-        reason = (
-            "Web検索結果に閉店・営業終了を示す情報がありました。"
-        )
 
         print(
             "❌ 閉店確認・店舗除外：",
@@ -766,17 +1268,15 @@ def check_hotpepper_shop_with_tavily(
 
         return {
             "status": "closed",
-            "reason": reason
+            "reason": (
+                "Web検索結果に閉店・営業終了を示す情報がありました。"
+            )
         }
 
     if (
         open_score >= 2
         and open_score >= closed_score
     ):
-
-        reason = (
-            "Web検索結果に現在営業中を示す情報がありました。"
-        )
 
         print(
             "✅ 営業中情報確認：",
@@ -786,7 +1286,9 @@ def check_hotpepper_shop_with_tavily(
 
         return {
             "status": "open",
-            "reason": reason
+            "reason": (
+                "Web検索結果に現在営業中を示す情報がありました。"
+            )
         }
 
     print(
@@ -933,10 +1435,6 @@ def verify_hotpepper_shops_with_tavily(
             shop
         )
 
-    # --------------------------------------------------------
-    # 番号を振り直す
-    # --------------------------------------------------------
-
     for index, shop in enumerate(
         verified_shops,
         start=1
@@ -1003,10 +1501,6 @@ def search_hotpepper(
         )
 
         return []
-
-    # --------------------------------------------------------
-    # 自然文をHot Pepper用キーワードへ変換
-    # --------------------------------------------------------
 
     search_keyword = (
         build_hotpepper_keyword(
@@ -1221,10 +1715,6 @@ def search_hotpepper(
             }
         )
 
-    # --------------------------------------------------------
-    # ここで店舗ごとのTavily確認
-    # --------------------------------------------------------
-
     verified_shops = (
         verify_hotpepper_shops_with_tavily(
             formatted_shops
@@ -1340,9 +1830,6 @@ def should_search_tavily(
         "予約",
         "おすすめ",
         "人気",
-
-        "近く",
-        "近所",
 
         "堀之内",
         "南大沢",
@@ -1505,6 +1992,24 @@ def build_gourmet_prompt(
         + "【今回のユーザー依頼】\n"
 
         + user_text
+
+        + "\n\n"
+
+        + "【LINE選択式で確定した条件】\n"
+
+        + "今回の依頼はLINE上で以下の条件を"
+          "ユーザーが選択して確定しています。"
+
+        + "\n"
+
+        + user_text
+
+        + "\n"
+
+        + "したがって、場所・ジャンル・予算・人数・"
+          "時間について再質問しないでください。"
+
+        + "この条件を使って店舗候補を評価してください。"
     )
 
     # --------------------------------------------------------
@@ -1553,18 +2058,6 @@ def build_gourmet_prompt(
 
             + "この店舗候補を使って回答してください。"
 
-            + "ユーザーがすでに地域と料理ジャンルを"
-
-            + "指定している場合、"
-
-            + "その情報をもう一度質問しないでください。"
-
-            + "ユーザーの条件が十分に揃っている場合は、"
-
-            + "追加質問だけで終わらず、"
-
-            + "取得した店舗候補から候補を提示してください。"
-
             + "店舗名、ジャンル、場所、予算などの情報は、"
 
             + "Hot Pepper検索結果に存在する情報を"
@@ -1574,6 +2067,10 @@ def build_gourmet_prompt(
             + "Hot Pepper検索結果に存在しない情報を"
 
             + "推測して作らないでください。"
+
+            + "ユーザーが指定した予算・人数・時間も"
+
+            + "候補を絞り込む際の条件として考慮してください。"
 
             + "店舗が複数ある場合は、"
 
@@ -1642,12 +2139,6 @@ def build_gourmet_prompt(
             + "Web検索結果だけで断定できない場合は、"
 
             + "断定を避けてください。"
-
-            + "Web検索結果とユーザーの依頼を踏まえて、"
-
-            + "現在利用できる可能性が高い店舗を"
-
-            + "優先してください。"
         )
 
     # --------------------------------------------------------
@@ -1660,35 +2151,27 @@ def build_gourmet_prompt(
 
         + "【今回の重要な回答ルール】\n"
 
-        + "今回の店舗検索機能では、"
+        + "今回の店舗検索では、"
 
-        + "Hot Pepper APIによる実店舗検索が"
+        + "ユーザーがLINEの選択画面から"
 
-        + "すでに実行されています。"
+        + "場所・ジャンル・予算・人数・時間を"
 
-        + "さらに各Hot Pepper店舗について、"
+        + "すでに確定しています。"
 
-        + "Tavilyによる営業状況確認も実行されています。"
+        + "これらについて再度質問しないでください。"
 
-        + "ユーザーが地域とジャンルなどを"
+        + "Hot Pepperの実店舗候補を利用して、"
 
-        + "すでに指定している場合は、"
+        + "条件に合う店舗を最大3店舗程度提示してください。"
 
-        + "同じ条件をもう一度質問しないでください。"
+        + "候補が少ない場合は、"
 
-        + "十分な条件が揃っている場合は、"
+        + "取得できた候補を正直に提示してください。"
 
-        + "検索結果から店舗候補を提示してください。"
+        + "候補が取得できなかった場合は、"
 
-        + "ただし、ユーザーが明確に"
-
-        + "追加条件を指定している場合は、"
-
-        + "その条件を優先してください。"
-
-        + "過去の会話でユーザーが答えた情報も"
-
-        + "再質問しないでください。"
+        + "存在しない店舗を作らないでください。"
 
         + "\n\n"
 
@@ -1974,17 +2457,6 @@ def ask_groq(
 
     if not choices:
 
-        print(
-            "Groq choices が存在しません。",
-            flush=True
-        )
-
-        print(
-            "Groq JSON：",
-            result,
-            flush=True
-        )
-
         raise RuntimeError(
             "Groqのchoicesが空です。"
         )
@@ -1995,17 +2467,6 @@ def ask_groq(
 
     if not message:
 
-        print(
-            "Groq message が存在しません。",
-            flush=True
-        )
-
-        print(
-            "Groq choice：",
-            choices[0],
-            flush=True
-        )
-
         raise RuntimeError(
             "Groqのmessageがありません。"
         )
@@ -2013,25 +2474,6 @@ def ask_groq(
     answer = message.get(
         "content",
         ""
-    )
-
-    print(
-        "Groq finish_reason：",
-        choices[0].get(
-            "finish_reason"
-        ),
-        flush=True
-    )
-
-    print(
-        "Groq content文字数：",
-        len(answer)
-        if isinstance(
-            answer,
-            str
-        )
-        else "文字列ではありません",
-        flush=True
     )
 
     if not isinstance(
@@ -2044,12 +2486,6 @@ def ask_groq(
         )
 
     if not answer.strip():
-
-        print(
-            "Groq message 全体：",
-            message,
-            flush=True
-        )
 
         raise RuntimeError(
             "Groqの回答本文が空です。"
@@ -2205,9 +2641,7 @@ def clean_answer(
 
         return ""
 
-    answer = answer.strip()
-
-    return answer
+    return answer.strip()
 
 
 # ============================================================
@@ -2352,43 +2786,6 @@ def ask_gourmet_ai(
 
 
 # ============================================================
-# LINE返信
-# ============================================================
-
-def reply_to_line(
-    reply_token,
-    text
-):
-
-    with ApiClient(
-        configuration
-    ) as api_client:
-
-        messaging_api = (
-            MessagingApi(
-                api_client
-            )
-        )
-
-        messaging_api.reply_message(
-
-            ReplyMessageRequest(
-
-                reply_token=
-                    reply_token,
-
-                messages=[
-
-                    TextMessage(
-                        text=text
-                    )
-
-                ]
-            )
-        )
-
-
-# ============================================================
 # Health Check
 # ============================================================
 
@@ -2464,19 +2861,7 @@ def test():
                 raw_body
             )
 
-            print(
-                "TEST Manual JSON Parse：",
-                data,
-                flush=True
-            )
-
         except json.JSONDecodeError as e:
-
-            print(
-                "TEST Manual JSON Parse Error：",
-                e,
-                flush=True
-            )
 
             return {
 
@@ -2645,11 +3030,21 @@ def callback():
             continue
 
         user_text = (
-            event.message.text
+            event.message.text.strip()
         )
 
         user_id = (
             event.source.user_id
+        )
+
+        print(
+            "",
+            flush=True
+        )
+
+        print(
+            "========================================",
+            flush=True
         )
 
         print(
@@ -2664,21 +3059,72 @@ def callback():
             flush=True
         )
 
+        print(
+            "========================================",
+            flush=True
+        )
+
         try:
 
-            answer = ask_gourmet_ai(
+            # =================================================
+            # LINE選択フロー
+            # =================================================
 
-                user_id,
-
-                user_text
+            selection_result = (
+                handle_line_selection(
+                    user_id,
+                    user_text
+                )
             )
 
-            reply_to_line(
+            if selection_result.get(
+                "type"
+            ) == "quick_reply":
 
-                event.reply_token,
+                reply_to_line_with_quick_reply(
 
-                answer
-            )
+                    event.reply_token,
+
+                    selection_result[
+                        "text"
+                    ],
+
+                    selection_result[
+                        "options"
+                    ]
+                )
+
+                continue
+
+            # =================================================
+            # 全条件が揃った
+            # =================================================
+
+            if selection_result.get(
+                "type"
+            ) == "search":
+
+                search_text = (
+                    selection_result[
+                        "search_text"
+                    ]
+                )
+
+                answer = ask_gourmet_ai(
+
+                    user_id,
+
+                    search_text
+                )
+
+                reply_to_line(
+
+                    event.reply_token,
+
+                    answer
+                )
+
+                continue
 
         except Exception as e:
 
@@ -2688,13 +3134,23 @@ def callback():
                 flush=True
             )
 
-            reply_to_line(
+            try:
 
-                event.reply_token,
+                reply_to_line(
 
-                "申し訳ありません。"
-                "処理中にエラーが発生しました。"
-            )
+                    event.reply_token,
+
+                    "申し訳ありません。"
+                    "処理中にエラーが発生しました。"
+                )
+
+            except Exception as reply_error:
+
+                print(
+                    "LINE返信エラー：",
+                    reply_error,
+                    flush=True
+                )
 
     return "OK"
 
