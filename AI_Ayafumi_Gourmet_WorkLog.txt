@@ -4,7 +4,7 @@
 
 このファイルは「AIアヤフミ（グルメ） / AI_Ayafumi_Gourmet」の開発作業履歴。
 
-各開発チャット終了時に、原則としてファイル末尾へ追記する。
+新しい作業記録は、各開発チャットの終了処理時に原則としてファイル末尾へ1件追記する。
 
 記録対象：
 
@@ -22,21 +22,23 @@
 
 このファイル自体はGit管理対象。
 
-保存場所：
-
-`C:\Users\ayafumi\Desktop\AI_Ayafumi\AI_Ayafumi_Gourmet\AI_Ayafumi_Gourmet_WorkLog.txt`
-
 関連正本：
 
-`AI_Ayafumi_Gourmet_Overview.txt`
+- `AI_Ayafumi_Gourmet_Overview.txt`
+- `AI_Ayafumi_Gourmet_Roadmap.txt`
 
 基本方針：
 
-- Overview = 現在の正しい仕様・構成・設計・ロードマップ
+- Overview = 現在の正しい仕様・構成・設計・開発ルール
+- Roadmap = 現在の開発計画・Phase・進捗・保留・次にやること
 - WorkLog = そこへ至るまでの開発作業履歴
 - WorkLogは「上が古い / 下が新しい」の時系列で管理する
-- 過去ログは原則として書き換えず、新しい作業を末尾へ追記する
-- 新規ログでは共通フォーマットを基本とし、不要な項目は省略可能
+- 過去ログは原則として書き換えない
+- 過去ログ内に旧Overview / WorkLog運用や古いRoadmapが書かれていても、当時の履歴として保持する
+- 現在の正本は最新のOverview / Roadmapとする
+
+Overview / Roadmap / WorkLog は原則としてチャット途中では更新せず、終了処理時に必要なものだけ更新する。
+ユーザーが途中更新を明示した場合のみ例外とする。
 
 共通フォーマット：
 
@@ -661,4 +663,3 @@ Gourmet固有の開発課題は、Ramen完成後に再整理する。
 最重要条件：
 
 **名前は「AIアヤフミ（グルメ）」のまま維持し、Ramenで完成・実証した検索基盤を居酒屋分野へ安全に横展開する。**
-
