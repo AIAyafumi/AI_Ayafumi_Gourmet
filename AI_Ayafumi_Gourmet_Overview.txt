@@ -712,7 +712,7 @@ git push
 
 ---
 
-# 25. Bridge開発プロトコル v1.3
+# 25. Bridge開発プロトコル v1.4
 
 対象：
 
@@ -810,13 +810,29 @@ Bridgeへ大量出力を返さない。
 
 まず `git status --short`、`git diff --name-status`、`git diff --stat` 等で範囲を確認し、必要な部分だけ読む。
 
-## 25-7. ドキュメント更新
+## 25-7. コード・patch搬送
+
+長いPython / JavaScript等のrawソースを、PowerShell文字列やhere-stringへ直接埋め込まない。
+
+巨大なBase64文字列を手動PowerShellへ貼り付けて搬送しない。
+
+コード・patchの搬送は以下を優先する。
+
+- Python本体変更は原則として既存の `safe_update.py` を使う
+- Git patchは小さく分割し、`git apply --check` 成功後に適用する
+- Base64は必要な場合に利用できるが、巨大ペイロードを手動貼り付けする用途には使わない
+- 一時コードが必要な場合も、rawソースをPowerShellの多重quoteで組み立てない
+- 手動PowerShellは短い工程へ分割し、確認・変更・検証・Git保存を1回へ詰め込みすぎない
+
+Bridge自身の修理中など、Bridge経路そのものを信頼できない場合は通常PowerShellを使用してよい。
+
+## 25-8. ドキュメント更新
 
 Overview / Roadmap / WorkLog の役割と更新タイミングは、各Projectの文書運用ルールを正本とする。
 
 チャット途中では原則更新せず、終了処理時に必要な文書だけ更新する。
 
-## 25-8. 最重要条件
+## 25-9. 最重要条件
 
 - 正常に動いているコードを壊さない
 - 自動化のために安全確認を省略しない
