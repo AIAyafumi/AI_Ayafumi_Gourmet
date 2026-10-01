@@ -3042,6 +3042,308 @@ def save_hotpepper_smoking_info(
             conn.close()
 
 
+
+def normalize_phone_for_store_match(
+    value,
+):
+    """
+    店舗照合用に電話番号を数字だけへ正規化する。
+    """
+    return re.sub(
+        r"\D",
+        "",
+        str(
+            value
+            or ""
+        ),
+    )
+
+
+def smoking_store_names_are_compatible(
+    name1,
+    name2,
+):
+    """
+    電話番号一致後に使う、
+    喫煙情報alias専用の店名安全確認。
+    """
+
+    normalized1 = (
+        normalize_shop_name_for_duplicate(
+            name1
+        )
+    )
+
+    normalized2 = (
+        normalize_shop_name_for_duplicate(
+            name2
+        )
+    )
+
+    if not normalized1 or not normalized2:
+        return False
+
+    if normalized1 == normalized2:
+        return True
+
+    if min(
+        len(normalized1),
+        len(normalized2),
+    ) < 3:
+        return False
+
+    return (
+        normalized1 in normalized2
+        or normalized2 in normalized1
+    )
+
+
+def get_neon_gourmet_smoking_info(
+    shop,
+    conn=None,
+):
+    """
+    Neon smoking_infoを取得する。
+
+    通常store_idで見つからない場合は、
+    電話番号完全一致 + 店名包含で
+    alias候補を安全に探す。
+    """
+
+    if not isinstance(
+        shop,
+        dict,
+    ):
+        return None
+
+    owns_conn = conn is None
+
+    if owns_conn:
+        conn = (
+            _get_gourmet_neon_connection()
+        )
+
+    if conn is None:
+        return None
+
+    try:
+        store_id = (
+            _find_gourmet_neon_store_id(
+                conn,
+                shop,
+                create_if_missing=False,
+            )
+        )
+
+        if store_id is not None:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        status,
+                        raw_text,
+                        source,
+                        checked_at
+                    FROM smoking_info
+                    WHERE store_id = %s
+                    """,
+                    (
+                        store_id,
+                    ),
+                )
+
+                row = cur.fetchone()
+
+            if row is not None:
+                status, raw_text, source, checked_at = row
+
+                return {
+                    "status": status,
+                    "raw_text": raw_text or "",
+                    "source": source or "",
+                    "checked_at": checked_at,
+                    "store_id": store_id,
+                    "match_type": "direct",
+                }
+
+        phone = (
+            normalize_phone_for_store_match(
+                shop.get("phone")
+                or shop.get("tel")
+            )
+        )
+
+        if not phone:
+            return None
+
+        wanted_name = str(
+            shop.get("name")
+            or ""
+        )
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    s.id,
+                    s.name,
+                    si.status,
+                    si.raw_text,
+                    si.source,
+                    si.checked_at
+                FROM stores s
+                JOIN smoking_info si
+                  ON si.store_id = s.id
+                WHERE REGEXP_REPLACE(
+                    COALESCE(s.phone, ''),
+                    '[^0-9]',
+                    '',
+                    'g'
+                ) = %s
+                ORDER BY s.id
+                """,
+                (
+                    phone,
+                ),
+            )
+
+            rows = cur.fetchall()
+
+        matches = []
+
+        for row in rows:
+            (
+                candidate_store_id,
+                candidate_name,
+                status,
+                raw_text,
+                source,
+                checked_at,
+            ) = row
+
+            if not (
+                smoking_store_names_are_compatible(
+                    wanted_name,
+                    candidate_name,
+                )
+            ):
+                continue
+
+            matches.append(
+                {
+                    "status": status,
+                    "raw_text": raw_text or "",
+                    "source": source or "",
+                    "checked_at": checked_at,
+                    "store_id": candidate_store_id,
+                    "match_type": "phone_name_alias",
+                }
+            )
+
+        if len(matches) != 1:
+            return None
+
+        return matches[0]
+
+    except Exception as e:
+        print(
+            "Neon喫煙情報読込エラー"
+            "（既存情報で継続）:",
+            e,
+        )
+        return None
+
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+
+def enrich_shops_with_neon_smoking_info(
+    shops,
+):
+    """
+    喫煙情報が無い候補だけ、
+    Neon smoking_infoで補完する。
+
+    Hot Pepper等ですでにnon_smokingがある場合は
+    既存情報を優先して上書きしない。
+    """
+
+    result = []
+
+    for shop in shops or []:
+
+        item = dict(shop)
+
+        existing = str(
+            item.get(
+                "non_smoking",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if existing:
+            result.append(item)
+            continue
+
+        info = (
+            get_neon_gourmet_smoking_info(
+                item
+            )
+        )
+
+        if info is None:
+            result.append(item)
+            continue
+
+        raw_text = str(
+            info.get(
+                "raw_text",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if not raw_text:
+            result.append(item)
+            continue
+
+        item["non_smoking"] = raw_text
+
+        item[
+            "smoking_info_source"
+        ] = info.get(
+            "source",
+            "",
+        )
+
+        item[
+            "smoking_info_match_type"
+        ] = info.get(
+            "match_type",
+            "",
+        )
+
+        item[
+            "smoking_info_store_id"
+        ] = info.get(
+            "store_id"
+        )
+
+        print(
+            "Neon喫煙情報補完: "
+            f"{item.get('name', '')} / "
+            f"{raw_text} / "
+            f"{info.get('match_type', '')}"
+        )
+
+        result.append(item)
+
+    return result
+
+
 def classify_smoking_condition(
     shop,
     smoking_condition,
@@ -3374,6 +3676,12 @@ def search_current_location_second_party(
             max_distance_meters=(
                 CURRENT_LOCATION_SEARCH_RADIUS_METERS
             ),
+        )
+    )
+
+    merged_results = (
+        enrich_shops_with_neon_smoking_info(
+            merged_results
         )
     )
 
