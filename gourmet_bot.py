@@ -2,6 +2,7 @@ import os
 import time
 import json
 import re
+import math
 import unicodedata
 import requests
 
@@ -2823,8 +2824,11 @@ def search_yahoo_local(
     user_text,
 ):
     """
-    指定駅の座標を取得し、
-    半径1.5km以内を検索する。
+    指定駅名とジャンルでYahoo!キーワード検索を優先する。
+
+    キーワード検索で候補が見つからない場合は、
+    駅座標を取得して半径1.5km以内を検索する。
+    駅名 + ジャンルの二段構えで候補を取得する。
     """
 
     location = extract_location_from_text(
@@ -2837,6 +2841,44 @@ def search_yahoo_local(
 
     if location:
 
+        # =====================================================
+        # 駅名 + ジャンルでキーワード検索
+        # =====================================================
+
+        search_keyword = " ".join(
+            part
+            for part in [
+                location,
+                keyword,
+            ]
+            if part
+        ).strip()
+
+        print(
+            "Yahoo!キーワード検索:",
+            search_keyword,
+        )
+
+        if search_keyword:
+
+            results = search_yahoo_local_keyword(
+                search_keyword
+            )
+
+            if results:
+
+                print(
+                    f"Yahoo!キーワード検索取得: "
+                    f"{len(results)}件"
+                )
+
+                return results
+
+        # =====================================================
+        # キーワード検索で候補がない場合
+        # 駅座標 + 半径検索へフォールバック
+        # =====================================================
+
         coordinates = (
             get_yahoo_location_coordinates(
                 location
@@ -2847,9 +2889,6 @@ def search_yahoo_local(
 
             latitude, longitude = coordinates
 
-            if keyword == "その他":
-                keyword = "飲食店"
-
             return search_yahoo_local_by_coordinates(
                 latitude,
                 longitude,
@@ -2857,23 +2896,11 @@ def search_yahoo_local(
                 distance=YAHOO_SEARCH_DISTANCE_METERS,
             )
 
-        fallback_keyword = " ".join(
-            part
-            for part in [
-                location,
-                keyword,
-            ]
-            if part
-        )
-
-        return search_yahoo_local_keyword(
-            fallback_keyword
-        )
+        return []
 
     return search_yahoo_local_keyword(
         keyword
     )
-
 
 # =========================================================
 # Hot Pepper + Yahoo! 統合
