@@ -2859,6 +2859,189 @@ def filter_second_party_results(
 
     return filtered
 
+
+def normalize_hotpepper_smoking_status(
+    raw_text,
+):
+    """
+    Hot Pepperの喫煙情報を
+    smoking_info.statusへ正規化する。
+
+    戻り値:
+        smoking_allowed
+        partial
+        non_smoking
+        heated_tobacco
+        smoking_room
+        unknown
+    """
+
+    text = normalize_text(
+        raw_text or ""
+    )
+
+    if not text:
+        return "unknown"
+
+    if (
+        "加熱式たばこ" in text
+        or "加熱式タバコ" in text
+        or "加熱式煙草" in text
+    ):
+        return "heated_tobacco"
+
+    if (
+        "喫煙室" in text
+        or "喫煙専用室" in text
+    ):
+        return "smoking_room"
+
+    if any(
+        keyword in text
+        for keyword in [
+            "全面禁煙",
+            "全席禁煙",
+            "完全禁煙",
+        ]
+    ):
+        return "non_smoking"
+
+    if any(
+        keyword in text
+        for keyword in [
+            "禁煙席なし",
+            "全席喫煙可",
+            "喫煙可",
+            "喫煙席あり",
+        ]
+    ):
+        return "smoking_allowed"
+
+    if "一部禁煙" in text:
+        return "partial"
+
+    return "unknown"
+
+
+def save_hotpepper_smoking_info(
+    shop,
+    conn=None,
+):
+    """
+    Hot Pepper由来の喫煙情報を
+    Neon smoking_infoへ保存する。
+
+    検索結果の候補選定にはまだ影響させない。
+    """
+
+    if not isinstance(
+        shop,
+        dict,
+    ):
+        return False
+
+    raw_text = str(
+        shop.get(
+            "non_smoking",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if not raw_text:
+        return False
+
+    status = (
+        normalize_hotpepper_smoking_status(
+            raw_text
+        )
+    )
+
+    owns_conn = conn is None
+
+    if owns_conn:
+        conn = (
+            _get_gourmet_neon_connection()
+        )
+
+    if conn is None:
+        return False
+
+    try:
+        with conn:
+
+            store_id = (
+                _find_gourmet_neon_store_id(
+                    conn,
+                    shop,
+                    create_if_missing=True,
+                )
+            )
+
+            if store_id is None:
+                return False
+
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    INSERT INTO smoking_info (
+                        store_id,
+                        status,
+                        raw_text,
+                        source,
+                        checked_at,
+                        updated_at
+                    )
+
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        NOW(),
+                        NOW()
+                    )
+
+                    ON CONFLICT (store_id)
+
+                    DO UPDATE SET
+                        status = EXCLUDED.status,
+                        raw_text = EXCLUDED.raw_text,
+                        source = EXCLUDED.source,
+                        checked_at = NOW(),
+                        updated_at = NOW()
+                    """,
+                    (
+                        store_id,
+                        status,
+                        raw_text,
+                        "Hot Pepper",
+                    ),
+                )
+
+        print(
+            "喫煙情報DB保存: "
+            f"{shop.get('name', '')} / "
+            f"{status} / "
+            f"{raw_text}"
+        )
+
+        return True
+
+    except Exception as e:
+        print(
+            "喫煙情報DB保存エラー"
+            "（通常検索には影響なし）:",
+            e,
+        )
+        return False
+
+    finally:
+        if owns_conn:
+            conn.close()
+
+
 def classify_smoking_condition(
     shop,
     smoking_condition,
@@ -3142,16 +3325,21 @@ def search_current_location_second_party(
         )
     )
 
-    # Hot Pepperから取得できた営業時間をNeonへ蓄積する。
-    # 現段階では検索結果の採否・営業判定には使用しない。
+    # Hot Pepperから取得できた
+    # 営業時間・喫煙情報をNeonへ蓄積する。
+    # 喫煙情報は現段階では候補選定には使用しない。
     for shop in hotpepper_results:
         try:
             save_hotpepper_business_hours(
                 shop
             )
+
+            save_hotpepper_smoking_info(
+                shop
+            )
         except Exception as e:
             print(
-                "営業時間自動保存エラー"
+                "店舗属性自動保存エラー"
                 "（検索継続）:",
                 e,
             )
