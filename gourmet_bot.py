@@ -3726,10 +3726,10 @@ def verify_shops_with_tavily(
         "========================================"
     )
     print(
-        "統合店舗のTavily営業状況確認開始"
+        "統合店舗の営業状況確認開始"
     )
     print(
-        f"Tavily確認対象: {len(shops)}件"
+        f"営業確認対象: {len(shops)}件"
     )
     print(
         "========================================"
@@ -3748,7 +3748,12 @@ def verify_shops_with_tavily(
             )
         )
 
-        if verification is None:
+        if verification is not None:
+            verification_source = (
+                "メモリキャッシュ"
+            )
+
+        else:
             verification = (
                 get_neon_gourmet_status_cache(
                     shop
@@ -3756,27 +3761,35 @@ def verify_shops_with_tavily(
             )
 
             if verification is not None:
+                verification_source = (
+                    "Neonキャッシュ"
+                )
+
                 cache_gourmet_status_result(
                     shop,
                     verification,
                 )
 
-        if verification is None:
-            verification = (
-                check_shop_with_tavily(
-                    shop
+            else:
+                verification = (
+                    check_shop_with_tavily(
+                        shop
+                    )
                 )
-            )
 
-            cache_gourmet_status_result(
-                shop,
-                verification,
-            )
+                verification_source = (
+                    "Tavily新規確認"
+                )
 
-            save_neon_gourmet_status_cache(
-                shop,
-                verification,
-            )
+                cache_gourmet_status_result(
+                    shop,
+                    verification,
+                )
+
+                save_neon_gourmet_status_cache(
+                    shop,
+                    verification,
+                )
 
         status = verification.get(
             "status",
@@ -3789,7 +3802,8 @@ def verify_shops_with_tavily(
         )
 
         print(
-            f"Tavily確認: "
+            f"営業判定: "
+            f"{verification_source} / "
             f"{shop_name} → {status}"
         )
 
@@ -3820,7 +3834,7 @@ def verify_shops_with_tavily(
         if status == "closed":
 
             print(
-                f"Tavily判定で除外: "
+                f"営業判定で除外: "
                 f"{shop_name}"
             )
 
@@ -3847,7 +3861,7 @@ def verify_shops_with_tavily(
         time.sleep(0.2)
 
     print(
-        "統合店舗のTavily営業状況確認終了"
+        "統合店舗の営業状況確認終了"
     )
 
     print(
