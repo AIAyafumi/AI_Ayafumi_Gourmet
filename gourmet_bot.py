@@ -2735,6 +2735,8 @@ def should_search_hotpepper(user_text):
         "検索",
         "おすすめ",
         "開始",
+        "起動",
+        "スタート",
     ]
 
     if user_text == "開始":
@@ -5034,6 +5036,13 @@ def build_gourmet_prompt(
 31. 喫煙情報が不明な店舗については、
     喫煙可・禁煙のどちらとも断定しないでください。
 
+31-1. 検索結果の「喫煙情報」は、
+    原文の意味を変えずに扱ってください。
+    特に「一部禁煙」を
+    「一部喫煙席あり」などへ勝手に言い換えないでください。
+    「全面禁煙」「一部禁煙」「禁煙席なし」など、
+    取得した表現をそのまま提示してください。
+
 32. 「どちらでも」の場合は、
     喫煙条件を候補選定の必須条件にしないでください。
 
@@ -5331,17 +5340,76 @@ def ask_openrouter(prompt):
 # =========================================================
 
 def clean_answer(answer):
+    """
+    AI回答をLINEのプレーンテキスト向けに整形する。
+    """
+
     if not answer:
         return ""
 
-    answer = answer.strip()
+    answer = str(
+        answer
+    ).strip()
 
+    # HTML風改行
+    answer = re.sub(
+        r"<br\s*/?>",
+        "\n",
+        answer,
+        flags=re.IGNORECASE,
+    )
+
+    # <https://example.com> → https://example.com
+    answer = re.sub(
+        r"<(https?://[^>]+)>",
+        r"\1",
+        answer,
+    )
+
+    # [表示名](URL) → 表示名\nURL
+    answer = re.sub(
+        r"\[([^\]]+)\]\((https?://[^)]+)\)",
+        r"\1\n\2",
+        answer,
+    )
+
+    # Markdown見出し
+    answer = re.sub(
+        r"(?m)^#{1,6}\s*",
+        "",
+        answer,
+    )
+
+    # Markdown太字
     answer = answer.replace(
-        "### ",
+        "**",
         "",
     )
 
-    return answer
+    answer = answer.replace(
+        "__",
+        "",
+    )
+
+    # コードブロック記号
+    answer = answer.replace(
+        "```text",
+        "",
+    )
+
+    answer = answer.replace(
+        "```",
+        "",
+    )
+
+    # 不要な連続空行を整理
+    answer = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        answer,
+    )
+
+    return answer.strip()
 
 
 # =========================================================
@@ -5424,12 +5492,20 @@ def start_search_flow(
     state["ramen_style"] = ""
     state["people"] = ""
     state["time"] = ""
+    state["latitude"] = None
+    state["longitude"] = None
+    state["location_address"] = ""
+    state["smoking"] = ""
 
     reply_text(
         reply_token,
         (
-            "お店を探したい駅名を入力してください。\n"
-            "例：町田駅、新宿駅、京王堀之内駅"
+            "二次会のお店を探します。\n\n"
+            "まずLINEから位置情報を送ってください。\n"
+            "現在地を基準に近いお店を探します。\n\n"
+            "位置情報を使いたくない場合は、"
+            "「新宿駅」「京王堀之内駅」のように"
+            "駅名を入力してください。"
         ),
     )
 
@@ -6178,7 +6254,11 @@ def callback():
                     "time": "",
                 }
 
-                if user_text == "開始":
+                if user_text in {
+                    "開始",
+                    "起動",
+                    "スタート",
+                }:
 
                     start_search_flow(
                         event.reply_token,
