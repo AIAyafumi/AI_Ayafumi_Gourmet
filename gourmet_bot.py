@@ -800,6 +800,462 @@ def save_neon_gourmet_status_cache(
             conn.close()
 
 # =========================================================
+# Hot Pepper 営業時間パーサー
+# =========================================================
+
+BUSINESS_HOUR_DAY_ORDER = [
+    "月",
+    "火",
+    "水",
+    "木",
+    "金",
+    "土",
+    "日",
+]
+
+
+def expand_business_hour_days(day_text):
+    """
+    Hot Pepperの曜日表現を曜日リストへ展開する。
+
+    例:
+        月～木、日
+        火～日
+        金、土、祝前日
+    """
+
+    text = str(
+        day_text
+        or ""
+    ).strip()
+
+    if not text:
+        return []
+
+    result = []
+
+    for part in text.split("、"):
+
+        part = part.strip()
+
+        if not part:
+            continue
+
+        if part in {
+            "祝日",
+            "祝前日",
+        }:
+            result.append(part)
+            continue
+
+        if "～" in part:
+            start, end = [
+                item.strip()
+                for item in part.split(
+                    "～",
+                    1,
+                )
+            ]
+
+            if (
+                start in BUSINESS_HOUR_DAY_ORDER
+                and end in BUSINESS_HOUR_DAY_ORDER
+            ):
+                start_index = (
+                    BUSINESS_HOUR_DAY_ORDER.index(
+                        start
+                    )
+                )
+
+                end_index = (
+                    BUSINESS_HOUR_DAY_ORDER.index(
+                        end
+                    )
+                )
+
+                if start_index <= end_index:
+                    result.extend(
+                        BUSINESS_HOUR_DAY_ORDER[
+                            start_index:
+                            end_index + 1
+                        ]
+                    )
+                else:
+                    result.extend(
+                        BUSINESS_HOUR_DAY_ORDER[
+                            start_index:
+                        ]
+                    )
+                    result.extend(
+                        BUSINESS_HOUR_DAY_ORDER[
+                            :end_index + 1
+                        ]
+                    )
+
+                continue
+
+        if part in BUSINESS_HOUR_DAY_ORDER:
+            result.append(part)
+
+    # 順序を維持して重複除去
+    seen = set()
+    unique = []
+
+    for item in result:
+        if item in seen:
+            continue
+
+        seen.add(item)
+        unique.append(item)
+
+    return unique
+
+
+def parse_business_hour_time(time_text):
+    """
+    17:30～翌0:00 のような時間帯を正規化する。
+    """
+
+    import re
+
+    text = str(
+        time_text
+        or ""
+    ).strip()
+
+    match = re.fullmatch(
+        r"(\d{1,2}:\d{2})"
+        r"～"
+        r"(翌)?(\d{1,2}:\d{2})",
+        text,
+    )
+
+    if not match:
+        return None
+
+    open_time = match.group(1)
+    next_day = bool(
+        match.group(2)
+    )
+    close_time = match.group(3)
+
+    return {
+        "open_time": open_time,
+        "close_time": close_time,
+        "closes_next_day": next_day,
+    }
+
+
+def parse_hotpepper_business_hours(
+    open_text,
+    close_text,
+):
+    """
+    Hot Pepperの open / close を
+    曜日単位の正規化データへ変換する。
+
+    DB保存はまだ行わない。
+    """
+
+    import re
+
+    open_text = str(
+        open_text
+        or ""
+    ).strip()
+
+    close_text = str(
+        close_text
+        or ""
+    ).strip()
+
+    schedule = {}
+
+    # ---------------------------------------------
+    # 営業時間ブロック抽出
+    #
+    # JOYSOUNDのように
+    # 翌3:00金、土...
+    # と改行なしで連結されても分離する。
+    # ---------------------------------------------
+
+    pattern = re.compile(
+        r"("
+        r"(?:月|火|水|木|金|土|日|祝日|祝前日)"
+        r"(?:～(?:月|火|水|木|金|土|日))?"
+        r"(?:、"
+        r"(?:月|火|水|木|金|土|日|祝日|祝前日)"
+        r"(?:～(?:月|火|水|木|金|土|日))?"
+        r")*"
+        r")"
+        r":\s*"
+        r"("
+        r"\d{1,2}:\d{2}"
+        r"～"
+        r"(?:翌)?\d{1,2}:\d{2}"
+        r")"
+    )
+
+    for match in pattern.finditer(
+        open_text
+    ):
+        day_text = match.group(1)
+        time_text = match.group(2)
+
+        parsed_time = (
+            parse_business_hour_time(
+                time_text
+            )
+        )
+
+        if not parsed_time:
+            continue
+
+        for day in expand_business_hour_days(
+            day_text
+        ):
+            schedule[day] = {
+                "day": day,
+                "open_time": (
+                    parsed_time[
+                        "open_time"
+                    ]
+                ),
+                "close_time": (
+                    parsed_time[
+                        "close_time"
+                    ]
+                ),
+                "closes_next_day": (
+                    parsed_time[
+                        "closes_next_day"
+                    ]
+                ),
+                "is_closed": False,
+            }
+
+    # ---------------------------------------------
+    # 定休日
+    # ---------------------------------------------
+
+    if (
+        close_text
+        and close_text != "なし"
+    ):
+        for day in expand_business_hour_days(
+            close_text
+        ):
+            schedule[day] = {
+                "day": day,
+                "open_time": None,
+                "close_time": None,
+                "closes_next_day": False,
+                "is_closed": True,
+            }
+
+    return schedule
+
+
+BUSINESS_HOUR_DAY_TO_INDEX = {
+    "月": 0,
+    "火": 1,
+    "水": 2,
+    "木": 3,
+    "金": 4,
+    "土": 5,
+    "日": 6,
+}
+
+
+def save_hotpepper_business_hours(
+    shop,
+    conn=None,
+):
+    """
+    Hot Pepperの営業時間をbusiness_hoursへ保存する。
+
+    現段階では検索・営業判定には使用しない。
+    通常曜日（月～日）が7日すべて解釈できた場合だけ保存する。
+    祝日・祝前日の特殊営業時間は現在のDBスキーマ対象外。
+    """
+
+    if not isinstance(
+        shop,
+        dict,
+    ):
+        return False
+
+    open_text = str(
+        shop.get(
+            "open",
+            "",
+        )
+        or ""
+    ).strip()
+
+    close_text = str(
+        shop.get(
+            "close",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if not open_text:
+        return False
+
+    schedule = (
+        parse_hotpepper_business_hours(
+            open_text,
+            close_text,
+        )
+    )
+
+    weekday_schedule = {
+        day: schedule[day]
+        for day in BUSINESS_HOUR_DAY_TO_INDEX
+        if day in schedule
+    }
+
+    if (
+        len(weekday_schedule)
+        != len(BUSINESS_HOUR_DAY_TO_INDEX)
+    ):
+        print(
+            "営業時間DB保存省略"
+            "（7曜日を完全に解釈できず）: "
+            f"{shop.get('name', '')} / "
+            f"{len(weekday_schedule)}/7"
+        )
+        return False
+
+    owns_conn = conn is None
+
+    if owns_conn:
+        conn = (
+            _get_gourmet_neon_connection()
+        )
+
+    if conn is None:
+        return False
+
+    try:
+        with conn:
+
+            store_id = (
+                _find_gourmet_neon_store_id(
+                    conn,
+                    shop,
+                    create_if_missing=True,
+                )
+            )
+
+            if store_id is None:
+                return False
+
+            with conn.cursor() as cur:
+
+                for day, data in (
+                    weekday_schedule.items()
+                ):
+                    day_of_week = (
+                        BUSINESS_HOUR_DAY_TO_INDEX[
+                            day
+                        ]
+                    )
+
+                    cur.execute(
+                        """
+                        INSERT INTO business_hours (
+                            store_id,
+                            day_of_week,
+                            open_time,
+                            close_time,
+                            closes_next_day,
+                            is_closed,
+                            source,
+                            checked_at,
+                            updated_at
+                        )
+
+                        VALUES (
+                            %s, %s, %s, %s,
+                            %s, %s, %s,
+                            NOW(), NOW()
+                        )
+
+                        ON CONFLICT (
+                            store_id,
+                            day_of_week
+                        )
+
+                        DO UPDATE SET
+                            open_time =
+                                EXCLUDED.open_time,
+
+                            close_time =
+                                EXCLUDED.close_time,
+
+                            closes_next_day =
+                                EXCLUDED.closes_next_day,
+
+                            is_closed =
+                                EXCLUDED.is_closed,
+
+                            source =
+                                EXCLUDED.source,
+
+                            checked_at = NOW(),
+                            updated_at = NOW()
+                        """,
+                        (
+                            store_id,
+                            day_of_week,
+                            data.get(
+                                "open_time"
+                            ),
+                            data.get(
+                                "close_time"
+                            ),
+                            bool(
+                                data.get(
+                                    "closes_next_day",
+                                    False,
+                                )
+                            ),
+                            bool(
+                                data.get(
+                                    "is_closed",
+                                    False,
+                                )
+                            ),
+                            "Hot Pepper",
+                        ),
+                    )
+
+        print(
+            "営業時間DB保存: "
+            f"{shop.get('name', '')} / "
+            f"store_id={store_id} / "
+            "7曜日"
+        )
+
+        return True
+
+    except Exception as e:
+        print(
+            "営業時間DB保存エラー"
+            "（通常検索には影響なし）:",
+            e,
+        )
+        return False
+
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+# =========================================================
 # Flask
 # =========================================================
 
@@ -2317,6 +2773,20 @@ def search_current_location_second_party(
             hotpepper_results
         )
     )
+
+    # Hot Pepperから取得できた営業時間をNeonへ蓄積する。
+    # 現段階では検索結果の採否・営業判定には使用しない。
+    for shop in hotpepper_results:
+        try:
+            save_hotpepper_business_hours(
+                shop
+            )
+        except Exception as e:
+            print(
+                "営業時間自動保存エラー"
+                "（検索継続）:",
+                e,
+            )
 
     yahoo_results = (
         deduplicate_gourmet_shops(
