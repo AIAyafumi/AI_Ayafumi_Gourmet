@@ -2214,6 +2214,53 @@ def extract_location_from_text(user_text):
 # Hot Pepper
 # =========================================================
 
+
+def should_try_direct_station_input(user_text):
+    """
+    検索フロー外で送られた短い文字列を、
+    駅名候補として確認してよいか判定する。
+
+    実際に駅として存在するかどうかは
+    Yahoo!ローカルサーチで最終確認する。
+    """
+    text = normalize_text(
+        user_text
+    )
+
+    if not text:
+        return False
+
+    if len(text) > 24:
+        return False
+
+    if "\n" in text:
+        return False
+
+    conversation_keywords = [
+        "こんにちは",
+        "こんばんは",
+        "おはよう",
+        "ありがとう",
+        "教えて",
+        "どう思う",
+        "なぜ",
+        "なんで",
+        "何",
+        "？",
+        "?",
+        "！",
+        "!",
+    ]
+
+    if any(
+        keyword in text
+        for keyword in conversation_keywords
+    ):
+        return False
+
+    return True
+
+
 def should_search_hotpepper(user_text):
     keywords = [
         "店",
@@ -5248,6 +5295,45 @@ def callback():
         # =================================================
 
         if user_id not in search_states:
+
+            # -----------------------------------------
+            # 駅名の直接入力
+            # -----------------------------------------
+
+            if should_try_direct_station_input(
+                user_text
+            ):
+
+                candidate_location = (
+                    normalize_station_name(
+                        user_text
+                    )
+                )
+
+                station_coordinates = (
+                    get_yahoo_location_coordinates(
+                        candidate_location
+                    )
+                )
+
+                if station_coordinates:
+
+                    search_states[user_id] = {
+                        "step": "location",
+                        "location": "",
+                        "genre": "",
+                        "ramen_style": "",
+                        "people": "",
+                        "time": "",
+                    }
+
+                    handle_search_selection(
+                        event.reply_token,
+                        user_id,
+                        user_text,
+                    )
+
+                    continue
 
             if should_search_hotpepper(
                 user_text
