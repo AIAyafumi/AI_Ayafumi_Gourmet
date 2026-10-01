@@ -1067,6 +1067,348 @@ BUSINESS_HOUR_DAY_TO_INDEX = {
 }
 
 
+def evaluate_gourmet_business_hours(
+    schedule,
+    now=None,
+):
+    """
+    週次営業時間から指定時刻の営業状態を判定する。
+
+    戻り値:
+        {
+            "status": "open" | "closed" | "unknown",
+            "reason": str,
+        }
+
+    day_of_week:
+        0=月 ... 6=日
+
+    前日の closes_next_day も確認するため、
+    例: 水曜 11:00～翌3:00 は木曜1:00もopen。
+    """
+
+    from datetime import (
+        datetime,
+        timedelta,
+        timezone,
+    )
+
+    jst = timezone(
+        timedelta(
+            hours=9
+        )
+    )
+
+    if now is None:
+        now = datetime.now(
+            jst
+        )
+
+    elif now.tzinfo is None:
+        now = now.replace(
+            tzinfo=jst
+        )
+
+    else:
+        now = now.astimezone(
+            jst
+        )
+
+    if not isinstance(
+        schedule,
+        dict,
+    ):
+        return {
+            "status": "unknown",
+            "reason": (
+                "営業時間データ形式不正"
+            ),
+        }
+
+    weekday = now.weekday()
+    previous_weekday = (
+        weekday - 1
+    ) % 7
+
+    current_time = now.time().replace(
+        tzinfo=None
+    )
+
+    # -----------------------------------------------------
+    # 1. 前日の深夜営業を先に確認
+    # -----------------------------------------------------
+
+    previous = schedule.get(
+        previous_weekday
+    )
+
+    if isinstance(
+        previous,
+        dict,
+    ):
+        if (
+            not previous.get(
+                "is_closed",
+                False,
+            )
+            and previous.get(
+                "closes_next_day",
+                False,
+            )
+        ):
+            close_time = previous.get(
+                "close_time"
+            )
+
+            if (
+                close_time is not None
+                and current_time < close_time
+            ):
+                return {
+                    "status": "open",
+                    "reason": (
+                        "Neon営業時間: "
+                        "前日の深夜営業時間内"
+                    ),
+                }
+
+            # 翌0:00 は日付変更時点で終了。
+            # current_time < 00:00 は成立しないので
+            # 自然にclosed側へ進む。
+
+    # -----------------------------------------------------
+    # 2. 当日の営業時間確認
+    # -----------------------------------------------------
+
+    today = schedule.get(
+        weekday
+    )
+
+    if not isinstance(
+        today,
+        dict,
+    ):
+        return {
+            "status": "unknown",
+            "reason": (
+                "Neon営業時間: "
+                "当日の営業時間データなし"
+            ),
+        }
+
+    if today.get(
+        "is_closed",
+        False,
+    ):
+        return {
+            "status": "closed",
+            "reason": (
+                "Neon営業時間: "
+                "通常定休日"
+            ),
+        }
+
+    open_time = today.get(
+        "open_time"
+    )
+
+    close_time = today.get(
+        "close_time"
+    )
+
+    closes_next_day = bool(
+        today.get(
+            "closes_next_day",
+            False,
+        )
+    )
+
+    if (
+        open_time is None
+        or close_time is None
+    ):
+        return {
+            "status": "unknown",
+            "reason": (
+                "Neon営業時間: "
+                "開始・終了時刻不足"
+            ),
+        }
+
+    # 当日開始後。
+    if closes_next_day:
+        if current_time >= open_time:
+            return {
+                "status": "open",
+                "reason": (
+                    "Neon営業時間: "
+                    "当日の営業時間内"
+                ),
+            }
+
+        return {
+            "status": "closed",
+            "reason": (
+                "Neon営業時間: "
+                "本日の開店前"
+            ),
+        }
+
+    # 日跨ぎなし。
+    if (
+        open_time
+        <= current_time
+        < close_time
+    ):
+        return {
+            "status": "open",
+            "reason": (
+                "Neon営業時間: "
+                "当日の営業時間内"
+            ),
+        }
+
+    return {
+        "status": "closed",
+        "reason": (
+            "Neon営業時間: "
+            "通常営業時間外"
+        ),
+    }
+
+
+def get_neon_gourmet_business_hours_status(
+    shop,
+    now=None,
+    conn=None,
+):
+    """
+    Neon business_hoursを取得し、
+    指定時刻の営業状態を返す。
+
+    DB障害・店舗未登録・営業時間不足時はNone。
+    """
+
+    owns_conn = conn is None
+
+    if owns_conn:
+        conn = (
+            _get_gourmet_neon_connection()
+        )
+
+    if conn is None:
+        return None
+
+    try:
+        store_id = (
+            _find_gourmet_neon_store_id(
+                conn,
+                shop,
+                create_if_missing=False,
+            )
+        )
+
+        if store_id is None:
+            return None
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    day_of_week,
+                    open_time,
+                    close_time,
+                    closes_next_day,
+                    is_closed,
+                    source,
+                    checked_at
+                FROM business_hours
+                WHERE store_id = %s
+                ORDER BY day_of_week
+                """,
+                (
+                    store_id,
+                ),
+            )
+
+            rows = cur.fetchall()
+
+        if not rows:
+            return None
+
+        schedule = {}
+
+        for row in rows:
+            (
+                day_of_week,
+                open_time,
+                close_time,
+                closes_next_day,
+                is_closed,
+                source,
+                checked_at,
+            ) = row
+
+            schedule[
+                int(day_of_week)
+            ] = {
+                "open_time": open_time,
+                "close_time": close_time,
+                "closes_next_day": bool(
+                    closes_next_day
+                ),
+                "is_closed": bool(
+                    is_closed
+                ),
+                "source": source,
+                "checked_at": checked_at,
+            }
+
+        verification = (
+            evaluate_gourmet_business_hours(
+                schedule,
+                now=now,
+            )
+        )
+
+        if (
+            verification.get(
+                "status"
+            )
+            == "unknown"
+        ):
+            return None
+
+        verification[
+            "source"
+        ] = "Hot Pepper営業時間"
+
+        verification[
+            "store_id"
+        ] = store_id
+
+        print(
+            "Neon営業時間判定: "
+            f"{shop.get('name', '')} / "
+            f"{verification.get('status')} / "
+            f"{verification.get('reason')}"
+        )
+
+        return verification
+
+    except Exception as e:
+        print(
+            "Neon営業時間読込エラー"
+            "（従来営業確認へ継続）:",
+            e,
+        )
+        return None
+
+    finally:
+        if owns_conn:
+            conn.close()
+
+
 def save_hotpepper_business_hours(
     shop,
     conn=None,
@@ -4212,63 +4554,192 @@ def verify_shops_with_tavily(
             "",
         )
 
-        verification = (
+        verification = None
+        verification_source = None
+
+        cached_unknown = None
+        cached_unknown_source = None
+
+        # -------------------------------------------------
+        # 1. メモリキャッシュ
+        #
+        # open / closed はTavily等で得た
+        # 直近情報として営業時間DBより優先する。
+        #
+        # unknown はより具体的な営業時間判定を
+        # 試してから使う。
+        # -------------------------------------------------
+
+        memory_verification = (
             get_gourmet_status_cache(
                 shop
             )
         )
 
-        if verification is not None:
-            verification_source = (
-                "メモリキャッシュ"
-            )
+        if memory_verification is not None:
 
-        else:
-            verification = (
-                get_neon_gourmet_status_cache(
-                    shop
+            memory_status = str(
+                memory_verification.get(
+                    "status",
+                    "unknown",
                 )
-            )
+                or "unknown"
+            ).lower()
 
-            if verification is not None:
+            if memory_status in {
+                "open",
+                "closed",
+            }:
+                verification = (
+                    memory_verification
+                )
                 verification_source = (
-                    "Neonキャッシュ"
-                )
-
-                cache_gourmet_status_result(
-                    shop,
-                    verification,
+                    "メモリキャッシュ"
                 )
 
             else:
-                verification = (
-                    check_shop_with_tavily(
+                cached_unknown = (
+                    memory_verification
+                )
+                cached_unknown_source = (
+                    "メモリキャッシュ"
+                )
+
+        # -------------------------------------------------
+        # 2. Neon status cache
+        # -------------------------------------------------
+
+        if verification is None:
+
+            neon_verification = None
+
+            # すでにメモリunknownがある場合は、
+            # 同じ短期キャッシュをNeonから
+            # 再取得する必要はない。
+            if cached_unknown is None:
+
+                neon_verification = (
+                    get_neon_gourmet_status_cache(
                         shop
                     )
                 )
 
-                verification_source = (
-                    "Tavily新規確認"
-                )
+            if neon_verification is not None:
 
                 cache_gourmet_status_result(
                     shop,
-                    verification,
+                    neon_verification,
                 )
 
-                save_neon_gourmet_status_cache(
-                    shop,
-                    verification,
+                neon_status = str(
+                    neon_verification.get(
+                        "status",
+                        "unknown",
+                    )
+                    or "unknown"
+                ).lower()
+
+                if neon_status in {
+                    "open",
+                    "closed",
+                }:
+                    verification = (
+                        neon_verification
+                    )
+                    verification_source = (
+                        "Neonキャッシュ"
+                    )
+
+                else:
+                    cached_unknown = (
+                        neon_verification
+                    )
+                    cached_unknown_source = (
+                        "Neonキャッシュ"
+                    )
+
+        # -------------------------------------------------
+        # 3. Neon business_hours
+        #
+        # unknownキャッシュより具体的なため優先。
+        # open/closedキャッシュがあればここには来ない。
+        # -------------------------------------------------
+
+        if verification is None:
+
+            hours_verification = (
+                get_neon_gourmet_business_hours_status(
+                    shop
+                )
+            )
+
+            if hours_verification is not None:
+
+                verification = (
+                    hours_verification
+                )
+                verification_source = (
+                    "Neon営業時間"
                 )
 
-        status = verification.get(
-            "status",
-            "unknown",
-        )
+        # -------------------------------------------------
+        # 4. 有効なunknownキャッシュ
+        #
+        # 営業時間DBにも情報がない場合は、
+        # 既存TTLを尊重してTavily再問い合わせを避ける。
+        # -------------------------------------------------
 
-        reason = verification.get(
-            "reason",
-            "",
+        if (
+            verification is None
+            and cached_unknown is not None
+        ):
+            verification = (
+                cached_unknown
+            )
+            verification_source = (
+                cached_unknown_source
+            )
+
+        # -------------------------------------------------
+        # 5. 最終フォールバック: Tavily
+        # -------------------------------------------------
+
+        if verification is None:
+
+            verification = (
+                check_shop_with_tavily(
+                    shop
+                )
+            )
+
+            verification_source = (
+                "Tavily新規確認"
+            )
+
+            cache_gourmet_status_result(
+                shop,
+                verification,
+            )
+
+            save_neon_gourmet_status_cache(
+                shop,
+                verification,
+            )
+
+        status = str(
+            verification.get(
+                "status",
+                "unknown",
+            )
+            or "unknown"
+        ).lower()
+
+        reason = str(
+            verification.get(
+                "reason",
+                "",
+            )
+            or ""
         )
 
         print(
@@ -4317,7 +4788,9 @@ def verify_shops_with_tavily(
         shop["tavily_status"] = status
         shop["tavily_reason"] = reason
 
-        verified.append(shop)
+        verified.append(
+            shop
+        )
 
         print(
             f"候補として保持: "
@@ -4328,7 +4801,9 @@ def verify_shops_with_tavily(
             "----------------------------------------"
         )
 
-        time.sleep(0.2)
+        time.sleep(
+            0.2
+        )
 
     print(
         "統合店舗の営業状況確認終了"
