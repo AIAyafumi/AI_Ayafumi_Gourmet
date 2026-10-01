@@ -47,6 +47,8 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 HOTPEPPER_API_KEY = os.getenv("HOTPEPPER_API_KEY")
 YAHOO_CLIENT_ID = os.getenv("YAHOO_CLIENT_ID")
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 
 # =========================================================
 # URL
@@ -273,6 +275,508 @@ def cache_gourmet_status_result(
     return True
 
 
+# =========================================================
+# Neon PostgreSQL
+# =========================================================
+
+def _get_gourmet_neon_connection():
+    """
+    Gourmet専用Neon PostgreSQLへ接続する。
+
+    未設定・接続障害時はNoneを返し、
+    通常のWeb検索へフォールバックできるようにする。
+    """
+    if not DATABASE_URL:
+        return None
+
+    try:
+        import psycopg2
+
+        return psycopg2.connect(
+            DATABASE_URL,
+            connect_timeout=5,
+        )
+
+    except Exception as e:
+        print(
+            "Neon接続エラー（通常検索で継続）:",
+            e,
+        )
+        return None
+
+
+def _get_gourmet_db_coordinates(shop):
+    """
+    各検索元で異なる座標形式を吸収する。
+    """
+    coordinates = get_shop_coordinates(
+        shop
+    )
+
+    if coordinates:
+        return coordinates
+
+    latitude = shop.get(
+        "latitude",
+        "",
+    )
+
+    longitude = shop.get(
+        "longitude",
+        "",
+    )
+
+    try:
+        if (
+            latitude not in ("", None)
+            and longitude not in ("", None)
+        ):
+            return (
+                float(latitude),
+                float(longitude),
+            )
+    except (TypeError, ValueError):
+        pass
+
+    return None
+
+
+def _find_gourmet_neon_store_id(
+    conn,
+    shop,
+    create_if_missing=False,
+):
+    """
+    Neon storesの店舗IDを安全に解決する。
+
+    店名を正規化して検索し、
+    住所がある場合は正規化住所も一致した店舗だけを
+    同一店舗として扱う。
+    """
+    name = str(
+        shop.get("name")
+        or ""
+    ).strip()
+
+    if not name:
+        return None
+
+    normalized_name = (
+        normalize_shop_name_for_duplicate(
+            name
+        )
+    )
+
+    if not normalized_name:
+        return None
+
+    address = str(
+        shop.get("address")
+        or ""
+    ).strip()
+
+    wanted_address = (
+        normalize_address_for_duplicate(
+            address
+        )
+    )
+
+    with conn.cursor() as cur:
+
+        cur.execute(
+            """
+            SELECT
+                id,
+                address
+            FROM stores
+            WHERE normalized_name = %s
+            ORDER BY id
+            """,
+            (
+                normalized_name,
+            ),
+        )
+
+        rows = cur.fetchall()
+
+        store_id = None
+
+        if wanted_address:
+
+            for (
+                candidate_id,
+                candidate_address,
+            ) in rows:
+
+                normalized_candidate_address = (
+                    normalize_address_for_duplicate(
+                        candidate_address
+                    )
+                )
+
+                if (
+                    normalized_candidate_address
+                    == wanted_address
+                ):
+                    store_id = candidate_id
+                    break
+
+        elif len(rows) == 1:
+
+            store_id = rows[0][0]
+
+        elif len(rows) > 1:
+
+            # 住所不明で同名店舗が複数ある場合は
+            # 誤更新を避ける。
+            return None
+
+        if (
+            store_id is not None
+            or not create_if_missing
+        ):
+            return store_id
+
+        coordinates = (
+            _get_gourmet_db_coordinates(
+                shop
+            )
+        )
+
+        latitude = None
+        longitude = None
+
+        if coordinates:
+            latitude, longitude = coordinates
+
+        phone = str(
+            shop.get("phone")
+            or shop.get("tel")
+            or ""
+        )
+
+        genre = str(
+            shop.get("genre")
+            or ""
+        )
+
+        url = str(
+            shop.get("url")
+            or ""
+        )
+
+        source = str(
+            shop.get("source")
+            or "RuntimeStatus"
+        )
+
+        cur.execute(
+            """
+            INSERT INTO stores (
+                normalized_name,
+                name,
+                address,
+                latitude,
+                longitude,
+                phone,
+                genre,
+                url,
+                source
+            )
+            VALUES (
+                %s, %s, %s,
+                %s, %s, %s,
+                %s, %s, %s
+            )
+
+            ON CONFLICT (
+                normalized_name,
+                COALESCE(address, '')
+            )
+
+            DO UPDATE SET
+                name = EXCLUDED.name,
+
+                latitude = COALESCE(
+                    EXCLUDED.latitude,
+                    stores.latitude
+                ),
+
+                longitude = COALESCE(
+                    EXCLUDED.longitude,
+                    stores.longitude
+                ),
+
+                phone = COALESCE(
+                    NULLIF(EXCLUDED.phone, ''),
+                    stores.phone
+                ),
+
+                genre = COALESCE(
+                    NULLIF(EXCLUDED.genre, ''),
+                    stores.genre
+                ),
+
+                url = COALESCE(
+                    NULLIF(EXCLUDED.url, ''),
+                    stores.url
+                ),
+
+                source = COALESCE(
+                    NULLIF(stores.source, ''),
+                    EXCLUDED.source
+                ),
+
+                updated_at = NOW()
+
+            RETURNING id
+            """,
+            (
+                normalized_name,
+                name,
+                address,
+                latitude,
+                longitude,
+                phone,
+                genre,
+                url,
+                source,
+            ),
+        )
+
+        row = cur.fetchone()
+
+        if not row:
+            return None
+
+        return row[0]
+
+
+def get_neon_gourmet_status_cache(
+    shop,
+    conn=None,
+):
+    """
+    Neonから有効期限内の営業確認キャッシュを取得する。
+    """
+    owns_conn = conn is None
+
+    if owns_conn:
+        conn = (
+            _get_gourmet_neon_connection()
+        )
+
+    if conn is None:
+        return None
+
+    try:
+        store_id = (
+            _find_gourmet_neon_store_id(
+                conn,
+                shop,
+                create_if_missing=False,
+            )
+        )
+
+        if store_id is None:
+            return None
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    status,
+                    reason
+                FROM store_status_cache
+                WHERE store_id = %s
+                  AND expires_at > NOW()
+                """,
+                (
+                    store_id,
+                ),
+            )
+
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        status, reason = row
+
+        verification = {
+            "status": (
+                status
+                or "unknown"
+            ),
+            "reason": (
+                reason
+                or ""
+            ),
+        }
+
+        print(
+            f"Neon営業キャッシュ使用: "
+            f"{shop.get('name', '')} / "
+            f"{verification['status']}"
+        )
+
+        return verification
+
+    except Exception as e:
+        print(
+            "Neon営業キャッシュ読込エラー"
+            "（通常検索で継続）:",
+            e,
+        )
+        return None
+
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def save_neon_gourmet_status_cache(
+    shop,
+    verification,
+    conn=None,
+):
+    """
+    営業確認結果をNeonへTTL付きで保存する。
+    """
+    if not isinstance(
+        verification,
+        dict,
+    ):
+        return False
+
+    status = str(
+        verification.get(
+            "status",
+            "unknown",
+        )
+        or "unknown"
+    ).lower()
+
+    if status not in {
+        "open",
+        "closed",
+        "unknown",
+    }:
+        return False
+
+    ttl_minutes = (
+        _gourmet_status_cache_ttl_minutes(
+            status
+        )
+    )
+
+    owns_conn = conn is None
+
+    if owns_conn:
+        conn = (
+            _get_gourmet_neon_connection()
+        )
+
+    if conn is None:
+        return False
+
+    try:
+        with conn:
+
+            store_id = (
+                _find_gourmet_neon_store_id(
+                    conn,
+                    shop,
+                    create_if_missing=True,
+                )
+            )
+
+            if store_id is None:
+                return False
+
+            reason = str(
+                verification.get(
+                    "reason",
+                    "",
+                )
+                or ""
+            )
+
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    INSERT INTO store_status_cache (
+                        store_id,
+                        status,
+                        reason,
+                        source,
+                        checked_at,
+                        expires_at,
+                        updated_at
+                    )
+
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        NOW(),
+                        NOW()
+                            + (
+                                %s
+                                * INTERVAL '1 minute'
+                            ),
+                        NOW()
+                    )
+
+                    ON CONFLICT (store_id)
+
+                    DO UPDATE SET
+                        status = EXCLUDED.status,
+                        reason = EXCLUDED.reason,
+                        source = EXCLUDED.source,
+                        checked_at = NOW(),
+
+                        expires_at = NOW()
+                            + (
+                                %s
+                                * INTERVAL '1 minute'
+                            ),
+
+                        updated_at = NOW()
+                    """,
+                    (
+                        store_id,
+                        status,
+                        reason,
+                        "Tavily",
+                        ttl_minutes,
+                        ttl_minutes,
+                    ),
+                )
+
+        print(
+            f"Neon営業キャッシュ保存: "
+            f"{shop.get('name', '')} / "
+            f"{status} / "
+            f"{ttl_minutes}分"
+        )
+
+        return True
+
+    except Exception as e:
+        print(
+            "Neon営業キャッシュ保存エラー"
+            "（メモリキャッシュで継続）:",
+            e,
+        )
+        return False
+
+    finally:
+        if owns_conn:
+            conn.close()
 
 # =========================================================
 # Flask
@@ -2344,12 +2848,30 @@ def verify_shops_with_tavily(
 
         if verification is None:
             verification = (
+                get_neon_gourmet_status_cache(
+                    shop
+                )
+            )
+
+            if verification is not None:
+                cache_gourmet_status_result(
+                    shop,
+                    verification,
+                )
+
+        if verification is None:
+            verification = (
                 check_shop_with_tavily(
                     shop
                 )
             )
 
             cache_gourmet_status_result(
+                shop,
+                verification,
+            )
+
+            save_neon_gourmet_status_cache(
                 shop,
                 verification,
             )
