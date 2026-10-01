@@ -22,7 +22,7 @@ from linebot.v3.messaging import (
     QuickReplyItem,
     MessageAction,
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, LocationMessageContent
 from linebot.v3.exceptions import InvalidSignatureError
 
 
@@ -879,6 +879,13 @@ TIME_OPTIONS = [
     "昼",
     "夜",
     "いつでも",
+]
+
+
+SMOKING_OPTIONS = [
+    "喫煙できる店",
+    "禁煙の店",
+    "どちらでも",
 ]
 
 
@@ -2182,6 +2189,10 @@ def get_search_state(user_id):
             "ramen_style": "",
             "people": "",
             "time": "",
+            "latitude": None,
+            "longitude": None,
+            "location_address": "",
+            "smoking": "",
         }
 
     return search_states[user_id]
@@ -4789,6 +4800,36 @@ def handle_search_selection(
     )
 
     # =====================================================
+    # 喫煙条件
+    # =====================================================
+
+    if step == "smoking":
+
+        if user_text not in SMOKING_OPTIONS:
+
+            reply_text(
+                reply_token,
+                "喫煙条件を選択してください。",
+                build_quick_reply(
+                    SMOKING_OPTIONS
+                ),
+            )
+
+            return
+
+        state["smoking"] = user_text
+        state["step"] = "location_search_ready"
+
+        reply_text(
+            reply_token,
+            (
+                f"喫煙条件は「{user_text}」ですね。\n"
+                "現在地から近い二次会候補を探す準備ができました。"
+            ),
+        )
+
+        return
+    # =====================================================
     # 場所
     # =====================================================
 
@@ -5311,15 +5352,71 @@ def callback():
         ):
             continue
 
+        user_id = event.source.user_id
+
+        if not user_id:
+            continue
+
+        # =============================================
+        # 位置情報メッセージ
+        # =============================================
+
+        if isinstance(
+            event.message,
+            LocationMessageContent,
+        ):
+
+            latitude = float(
+                event.message.latitude
+            )
+
+            longitude = float(
+                event.message.longitude
+            )
+
+            address = str(
+                event.message.address
+                or ""
+            ).strip()
+
+            search_states[user_id] = {
+                "step": "smoking",
+                "location": "",
+                "genre": "",
+                "ramen_style": "",
+                "people": "",
+                "time": "",
+                "latitude": latitude,
+                "longitude": longitude,
+                "location_address": address,
+                "smoking": "",
+            }
+
+            print(
+                f"LINE位置情報受信: "
+                f"user={user_id}, "
+                f"lat={latitude}, "
+                f"lon={longitude}, "
+                f"address={address}"
+            )
+
+            reply_text(
+                event.reply_token,
+                (
+                    "現在地を受け取りました。\n"
+                    "喫煙条件を選んでください。"
+                ),
+                build_quick_reply(
+                    SMOKING_OPTIONS
+                ),
+            )
+
+            continue
+
         if not isinstance(
             event.message,
             TextMessageContent,
         ):
-            continue
-
-        user_id = event.source.user_id
-
-        if not user_id:
             continue
 
         user_text = (
