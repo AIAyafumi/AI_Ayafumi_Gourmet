@@ -148,6 +148,10 @@ GOURMET_STATUS_UNKNOWN_CACHE_MINUTES = 15
 # 最終確認からこの日数を超えたら営業判定に使用しない。
 GOURMET_BUSINESS_HOURS_MAX_AGE_DAYS = 7
 
+# Hot Pepper由来の喫煙情報は、
+# 最終確認からこの日数を超えたら再利用しない。
+GOURMET_SMOKING_INFO_MAX_AGE_DAYS = 30
+
 
 def _gourmet_status_cache_ttl_minutes(status):
     """営業確認結果のTTL（分）を返す。"""
@@ -3143,11 +3147,20 @@ def get_neon_gourmet_smoking_info(
                         status,
                         raw_text,
                         source,
-                        checked_at
+                        checked_at,
+                        (
+                            checked_at
+                            >= NOW()
+                            - (
+                                %s
+                                * INTERVAL '1 day'
+                            )
+                        ) AS is_fresh
                     FROM smoking_info
                     WHERE store_id = %s
                     """,
                     (
+                        GOURMET_SMOKING_INFO_MAX_AGE_DAYS,
                         store_id,
                     ),
                 )
@@ -3155,16 +3168,32 @@ def get_neon_gourmet_smoking_info(
                 row = cur.fetchone()
 
             if row is not None:
-                status, raw_text, source, checked_at = row
+                (
+                    status,
+                    raw_text,
+                    source,
+                    checked_at,
+                    is_fresh,
+                ) = row
 
-                return {
+                if not is_fresh:
+                    print(
+                        "Neon喫煙情報期限切れ: "
+                        f"{shop.get('name', '')} / "
+                        f"store_id={store_id} / "
+                        f"checked_at={checked_at} / "
+                        f"max_age="
+                        f"{GOURMET_SMOKING_INFO_MAX_AGE_DAYS}日"
+                    )
+                else:
+                    return {
                     "status": status,
                     "raw_text": raw_text or "",
                     "source": source or "",
                     "checked_at": checked_at,
                     "store_id": store_id,
-                    "match_type": "direct",
-                }
+                        "match_type": "direct",
+                    }
 
         phone = (
             normalize_phone_for_store_match(
@@ -3200,10 +3229,17 @@ def get_neon_gourmet_smoking_info(
                     '',
                     'g'
                 ) = %s
+                  AND si.checked_at
+                      >= NOW()
+                      - (
+                          %s
+                          * INTERVAL '1 day'
+                      )
                 ORDER BY s.id
                 """,
                 (
                     phone,
+                    GOURMET_SMOKING_INFO_MAX_AGE_DAYS,
                 ),
             )
 
