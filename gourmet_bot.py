@@ -144,6 +144,10 @@ GOURMET_STATUS_CACHE = {}
 GOURMET_STATUS_CACHE_MINUTES = 30
 GOURMET_STATUS_UNKNOWN_CACHE_MINUTES = 15
 
+# Hot Pepper由来の週次営業時間は、
+# 最終確認からこの日数を超えたら営業判定に使用しない。
+GOURMET_BUSINESS_HOURS_MAX_AGE_DAYS = 7
+
 
 def _gourmet_status_cache_ttl_minutes(status):
     """営業確認結果のTTL（分）を返す。"""
@@ -1321,12 +1325,21 @@ def get_neon_gourmet_business_hours_status(
                     closes_next_day,
                     is_closed,
                     source,
-                    checked_at
+                    checked_at,
+                    (
+                        checked_at
+                        >= NOW()
+                        - (
+                            %s
+                            * INTERVAL '1 day'
+                        )
+                    ) AS is_fresh
                 FROM business_hours
                 WHERE store_id = %s
                 ORDER BY day_of_week
                 """,
                 (
+                    GOURMET_BUSINESS_HOURS_MAX_AGE_DAYS,
                     store_id,
                 ),
             )
@@ -1347,7 +1360,20 @@ def get_neon_gourmet_business_hours_status(
                 is_closed,
                 source,
                 checked_at,
+                is_fresh,
             ) = row
+
+            if not is_fresh:
+                print(
+                    "Neon営業時間期限切れ: "
+                    f"{shop.get('name', '')} / "
+                    f"day={day_of_week} / "
+                    f"checked_at={checked_at} / "
+                    f"max_age="
+                    f"{GOURMET_BUSINESS_HOURS_MAX_AGE_DAYS}日"
+                )
+
+                return None
 
             schedule[
                 int(day_of_week)
