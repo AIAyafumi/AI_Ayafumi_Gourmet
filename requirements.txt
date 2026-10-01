@@ -3,3 +3,4 @@ requests
 python-dotenv
 groq
 line-bot-sdk
+psycopg2-binary
