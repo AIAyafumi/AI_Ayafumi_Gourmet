@@ -2864,6 +2864,420 @@ def filter_second_party_results(
     return filtered
 
 
+
+def hotpepper_primary_attribute_value(
+    raw_text,
+):
+    """
+    Hot Pepperの属性文字列から、
+    説明文より前の構造化値を取得する。
+
+    例:
+        "あり ：説明文" -> "あり"
+        "なし ：説明文" -> "なし"
+    """
+
+    text = str(
+        raw_text
+        or ""
+    ).strip()
+
+    if not text:
+        return ""
+
+    for separator in [
+        "：",
+        ":",
+    ]:
+        if separator in text:
+            text = text.split(
+                separator,
+                1,
+            )[0].strip()
+
+    return text
+
+
+def normalize_hotpepper_yes_no(
+    raw_text,
+):
+    """
+    Hot Pepperの「あり / なし」系属性を
+    True / False / Noneへ正規化する。
+    """
+
+    value = (
+        hotpepper_primary_attribute_value(
+            raw_text
+        )
+    )
+
+    if not value:
+        return None
+
+    normalized = normalize_text(
+        value
+    )
+
+    if normalized in {
+        "あり",
+        "有",
+        "有り",
+    }:
+        return True
+
+    if normalized in {
+        "なし",
+        "無",
+        "無し",
+    }:
+        return False
+
+    return None
+
+
+def normalize_hotpepper_midnight(
+    raw_text,
+):
+    """
+    Hot Pepperの深夜営業属性を
+    True / False / Noneへ正規化する。
+    """
+
+    value = (
+        hotpepper_primary_attribute_value(
+            raw_text
+        )
+    )
+
+    if not value:
+        return None
+
+    normalized = normalize_text(
+        value
+    )
+
+    if normalized == "営業している":
+        return True
+
+    if normalized == "営業していない":
+        return False
+
+    return normalize_hotpepper_yes_no(
+        value
+    )
+
+
+def normalize_hotpepper_phase37_attributes(
+    shop,
+):
+    """
+    Hot PepperのPhase 3-7向け属性を
+    DB保存可能な形へ正規化する。
+
+    この段階では保存・候補選定は行わない。
+    """
+
+    if not isinstance(
+        shop,
+        dict,
+    ):
+        return {}
+
+    return {
+        "budget_code": str(
+            shop.get(
+                "budget_code",
+                "",
+            )
+            or ""
+        ).strip(),
+
+        "budget_name": str(
+            shop.get(
+                "budget_name",
+                "",
+            )
+            or ""
+        ).strip(),
+
+        "budget_average": str(
+            shop.get(
+                "budget_average",
+                "",
+            )
+            or ""
+        ).strip(),
+
+        "private_room": (
+            normalize_hotpepper_yes_no(
+                shop.get(
+                    "private_room"
+                )
+            )
+        ),
+
+        "free_drink": (
+            normalize_hotpepper_yes_no(
+                shop.get(
+                    "free_drink"
+                )
+            )
+        ),
+
+        "midnight": (
+            normalize_hotpepper_midnight(
+                shop.get(
+                    "midnight"
+                )
+            )
+        ),
+
+        "karaoke": (
+            normalize_hotpepper_yes_no(
+                shop.get(
+                    "karaoke"
+                )
+            )
+        ),
+
+        "private_room_raw": str(
+            shop.get(
+                "private_room",
+                "",
+            )
+            or ""
+        ).strip(),
+
+        "free_drink_raw": str(
+            shop.get(
+                "free_drink",
+                "",
+            )
+            or ""
+        ).strip(),
+
+        "midnight_raw": str(
+            shop.get(
+                "midnight",
+                "",
+            )
+            or ""
+        ).strip(),
+
+        "karaoke_raw": str(
+            shop.get(
+                "karaoke",
+                "",
+            )
+            or ""
+        ).strip(),
+    }
+
+
+
+def save_hotpepper_venue_features(
+    shop,
+    conn=None,
+):
+    """
+    Hot Pepper由来のPhase 3-7属性を
+    Neon venue_featuresへ保存する。
+
+    現段階では候補選定には使用しない。
+    """
+
+    if not isinstance(
+        shop,
+        dict,
+    ):
+        return False
+
+    data = (
+        normalize_hotpepper_phase37_attributes(
+            shop
+        )
+    )
+
+    if not data:
+        return False
+
+    has_any_value = any(
+        [
+            data.get("budget_code"),
+            data.get("budget_name"),
+            data.get("budget_average"),
+            data.get("private_room") is not None,
+            data.get("free_drink") is not None,
+            data.get("midnight") is not None,
+            data.get("karaoke") is not None,
+            data.get("private_room_raw"),
+            data.get("free_drink_raw"),
+            data.get("midnight_raw"),
+            data.get("karaoke_raw"),
+        ]
+    )
+
+    if not has_any_value:
+        return False
+
+    owns_conn = conn is None
+
+    if owns_conn:
+        conn = (
+            _get_gourmet_neon_connection()
+        )
+
+    if conn is None:
+        return False
+
+    try:
+        with conn:
+
+            store_id = (
+                _find_gourmet_neon_store_id(
+                    conn,
+                    shop,
+                    create_if_missing=True,
+                )
+            )
+
+            if store_id is None:
+                return False
+
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    INSERT INTO venue_features (
+                        store_id,
+                        budget_code,
+                        budget_name,
+                        budget_average,
+                        private_room,
+                        free_drink,
+                        midnight,
+                        karaoke,
+                        private_room_raw,
+                        free_drink_raw,
+                        midnight_raw,
+                        karaoke_raw,
+                        source,
+                        checked_at,
+                        updated_at
+                    )
+
+                    VALUES (
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s,
+                        NOW(),
+                        NOW()
+                    )
+
+                    ON CONFLICT (store_id)
+
+                    DO UPDATE SET
+                        budget_code =
+                            EXCLUDED.budget_code,
+
+                        budget_name =
+                            EXCLUDED.budget_name,
+
+                        budget_average =
+                            EXCLUDED.budget_average,
+
+                        private_room =
+                            EXCLUDED.private_room,
+
+                        free_drink =
+                            EXCLUDED.free_drink,
+
+                        midnight =
+                            EXCLUDED.midnight,
+
+                        karaoke =
+                            EXCLUDED.karaoke,
+
+                        private_room_raw =
+                            EXCLUDED.private_room_raw,
+
+                        free_drink_raw =
+                            EXCLUDED.free_drink_raw,
+
+                        midnight_raw =
+                            EXCLUDED.midnight_raw,
+
+                        karaoke_raw =
+                            EXCLUDED.karaoke_raw,
+
+                        source =
+                            EXCLUDED.source,
+
+                        checked_at = NOW(),
+                        updated_at = NOW()
+                    """,
+                    (
+                        store_id,
+                        data.get(
+                            "budget_code"
+                        ),
+                        data.get(
+                            "budget_name"
+                        ),
+                        data.get(
+                            "budget_average"
+                        ),
+                        data.get(
+                            "private_room"
+                        ),
+                        data.get(
+                            "free_drink"
+                        ),
+                        data.get(
+                            "midnight"
+                        ),
+                        data.get(
+                            "karaoke"
+                        ),
+                        data.get(
+                            "private_room_raw"
+                        ),
+                        data.get(
+                            "free_drink_raw"
+                        ),
+                        data.get(
+                            "midnight_raw"
+                        ),
+                        data.get(
+                            "karaoke_raw"
+                        ),
+                        "Hot Pepper",
+                    ),
+                )
+
+        print(
+            "店舗属性DB保存: "
+            f"{shop.get('name', '')} / "
+            f"store_id={store_id}"
+        )
+
+        return True
+
+    except Exception as e:
+        print(
+            "店舗属性DB保存エラー"
+            "（通常検索には影響なし）:",
+            e,
+        )
+        return False
+
+    finally:
+        if owns_conn:
+            conn.close()
+
+
 def normalize_hotpepper_smoking_status(
     raw_text,
 ):
@@ -3664,8 +4078,9 @@ def search_current_location_second_party(
     )
 
     # Hot Pepperから取得できた
-    # 営業時間・喫煙情報をNeonへ蓄積する。
-    # 喫煙情報は現段階では候補選定には使用しない。
+    # 営業時間・喫煙情報・店舗属性をNeonへ蓄積する。
+    # 喫煙情報以外の店舗属性は
+    # 現段階では候補選定には使用しない。
     for shop in hotpepper_results:
         try:
             save_hotpepper_business_hours(
@@ -3673,6 +4088,10 @@ def search_current_location_second_party(
             )
 
             save_hotpepper_smoking_info(
+                shop
+            )
+
+            save_hotpepper_venue_features(
                 shop
             )
         except Exception as e:
@@ -4662,6 +5081,36 @@ def search_hotpepper_by_coordinates(
             "midnight": shop.get(
                 "midnight",
                 "",
+            ),
+            "budget_code": (
+                shop.get(
+                    "budget",
+                    {},
+                )
+                .get(
+                    "code",
+                    "",
+                )
+            ),
+            "budget_name": (
+                shop.get(
+                    "budget",
+                    {},
+                )
+                .get(
+                    "name",
+                    "",
+                )
+            ),
+            "budget_average": (
+                shop.get(
+                    "budget",
+                    {},
+                )
+                .get(
+                    "average",
+                    "",
+                )
             ),
             "source": "Hot Pepper",
         })
