@@ -136,6 +136,143 @@ YAHOO_SEARCH_DISTANCE_METERS = 1500
 # 候補が大量でも全件へ高コスト処理を実施しない。
 GOURMET_CANDIDATE_POOL_LIMIT = 10
 
+# 店舗営業確認のメモリキャッシュ。
+# open / closed は30分、unknownは15分保持する。
+GOURMET_STATUS_CACHE = {}
+GOURMET_STATUS_CACHE_MINUTES = 30
+GOURMET_STATUS_UNKNOWN_CACHE_MINUTES = 15
+
+
+def _gourmet_status_cache_ttl_minutes(status):
+    """営業確認結果のTTL（分）を返す。"""
+    return (
+        GOURMET_STATUS_UNKNOWN_CACHE_MINUTES
+        if str(status or "unknown").lower() == "unknown"
+        else GOURMET_STATUS_CACHE_MINUTES
+    )
+
+
+def _gourmet_status_cache_key(shop):
+    """店名+住所で営業確認キャッシュキーを作る。"""
+    name = normalize_text(
+        shop.get("name", "")
+    )
+
+    address = normalize_text(
+        shop.get("address", "")
+    )
+
+    return f"{name}|{address}"
+
+
+def get_gourmet_status_cache(shop):
+    """有効な営業確認キャッシュを返す。期限切れならNone。"""
+    key = _gourmet_status_cache_key(shop)
+
+    cached = GOURMET_STATUS_CACHE.get(
+        key
+    )
+
+    if not cached:
+        return None
+
+    timestamp = cached.get(
+        "timestamp"
+    )
+
+    ttl_minutes = cached.get(
+        "ttl_minutes",
+        GOURMET_STATUS_UNKNOWN_CACHE_MINUTES,
+    )
+
+    if timestamp is None:
+        return None
+
+    elapsed_seconds = (
+        time.monotonic()
+        - timestamp
+    )
+
+    if elapsed_seconds >= ttl_minutes * 60:
+        GOURMET_STATUS_CACHE.pop(
+            key,
+            None,
+        )
+        return None
+
+    verification = cached.get(
+        "verification"
+    )
+
+    if not isinstance(verification, dict):
+        return None
+
+    print(
+        f"営業確認キャッシュ使用: "
+        f"{shop.get('name', '')} / "
+        f"{verification.get('status', 'unknown')}"
+    )
+
+    return dict(verification)
+
+
+def cache_gourmet_status_result(
+    shop,
+    verification,
+):
+    """営業確認結果をメモリへ保存する。"""
+    if not isinstance(verification, dict):
+        return False
+
+    status = str(
+        verification.get(
+            "status",
+            "unknown",
+        )
+        or "unknown"
+    ).lower()
+
+    if status not in {
+        "open",
+        "closed",
+        "unknown",
+    }:
+        return False
+
+    ttl_minutes = (
+        _gourmet_status_cache_ttl_minutes(
+            status
+        )
+    )
+
+    key = _gourmet_status_cache_key(
+        shop
+    )
+
+    GOURMET_STATUS_CACHE[key] = {
+        "timestamp": time.monotonic(),
+        "ttl_minutes": ttl_minutes,
+        "verification": {
+            "status": status,
+            "reason": str(
+                verification.get(
+                    "reason",
+                    "",
+                )
+                or ""
+            ),
+        },
+    }
+
+    print(
+        f"営業確認キャッシュ保存: "
+        f"{shop.get('name', '')} / "
+        f"{status} / {ttl_minutes}分"
+    )
+
+    return True
+
+
 
 # =========================================================
 # Flask
@@ -2200,10 +2337,22 @@ def verify_shops_with_tavily(
         )
 
         verification = (
-            check_shop_with_tavily(
+            get_gourmet_status_cache(
                 shop
             )
         )
+
+        if verification is None:
+            verification = (
+                check_shop_with_tavily(
+                    shop
+                )
+            )
+
+            cache_gourmet_status_result(
+                shop,
+                verification,
+            )
 
         status = verification.get(
             "status",
