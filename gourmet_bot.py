@@ -152,6 +152,10 @@ GOURMET_BUSINESS_HOURS_MAX_AGE_DAYS = 7
 # 最終確認からこの日数を超えたら再利用しない。
 GOURMET_SMOKING_INFO_MAX_AGE_DAYS = 30
 
+# 予算・個室・飲み放題などの店舗属性は、
+# 最終確認からこの日数を超えたら再利用しない。
+GOURMET_VENUE_FEATURES_MAX_AGE_DAYS = 30
+
 
 def _gourmet_status_cache_ttl_minutes(status):
     """営業確認結果のTTL（分）を返す。"""
@@ -3278,6 +3282,435 @@ def save_hotpepper_venue_features(
             conn.close()
 
 
+
+def get_neon_gourmet_venue_features(
+    shop,
+    conn=None,
+):
+    """
+    Neon venue_featuresを取得する。
+
+    1. 通常のstore_id解決
+    2. 直接venue_featuresが無ければ
+       電話番号完全一致 + 店名互換でalias解決
+
+    alias候補が複数残る場合はNone。
+    """
+
+    if not isinstance(
+        shop,
+        dict,
+    ):
+        return None
+
+    owns_conn = conn is None
+
+    if owns_conn:
+        conn = (
+            _get_gourmet_neon_connection()
+        )
+
+    if conn is None:
+        return None
+
+    try:
+        store_id = (
+            _find_gourmet_neon_store_id(
+                conn,
+                shop,
+                create_if_missing=False,
+            )
+        )
+
+        if store_id is not None:
+
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    SELECT
+                        budget_code,
+                        budget_name,
+                        budget_average,
+                        private_room,
+                        free_drink,
+                        midnight,
+                        karaoke,
+                        private_room_raw,
+                        free_drink_raw,
+                        midnight_raw,
+                        karaoke_raw,
+                        source,
+                        checked_at,
+                        (
+                            checked_at
+                            >= NOW()
+                            - (
+                                %s
+                                * INTERVAL '1 day'
+                            )
+                        ) AS is_fresh
+                    FROM venue_features
+                    WHERE store_id = %s
+                    """,
+                    (
+                        GOURMET_VENUE_FEATURES_MAX_AGE_DAYS,
+                        store_id,
+                    ),
+                )
+
+                row = cur.fetchone()
+
+            if row is not None:
+
+                (
+                    budget_code,
+                    budget_name,
+                    budget_average,
+                    private_room,
+                    free_drink,
+                    midnight,
+                    karaoke,
+                    private_room_raw,
+                    free_drink_raw,
+                    midnight_raw,
+                    karaoke_raw,
+                    source,
+                    checked_at,
+                    is_fresh,
+                ) = row
+
+                if not is_fresh:
+                    print(
+                        "Neon店舗属性期限切れ: "
+                        f"{shop.get('name', '')} / "
+                        f"store_id={store_id} / "
+                        f"checked_at={checked_at} / "
+                        f"max_age="
+                        f"{GOURMET_VENUE_FEATURES_MAX_AGE_DAYS}日"
+                    )
+                else:
+                    return {
+                    "budget_code": (
+                        budget_code
+                        or ""
+                    ),
+                    "budget_name": (
+                        budget_name
+                        or ""
+                    ),
+                    "budget_average": (
+                        budget_average
+                        or ""
+                    ),
+                    "private_room": private_room,
+                    "free_drink": free_drink,
+                    "midnight": midnight,
+                    "karaoke": karaoke,
+                    "private_room_raw": (
+                        private_room_raw
+                        or ""
+                    ),
+                    "free_drink_raw": (
+                        free_drink_raw
+                        or ""
+                    ),
+                    "midnight_raw": (
+                        midnight_raw
+                        or ""
+                    ),
+                    "karaoke_raw": (
+                        karaoke_raw
+                        or ""
+                    ),
+                    "source": (
+                        source
+                        or ""
+                    ),
+                    "checked_at": checked_at,
+                    "store_id": store_id,
+                        "match_type": "direct",
+                    }
+
+        phone = (
+            normalize_phone_for_store_match(
+                shop.get("phone")
+                or shop.get("tel")
+            )
+        )
+
+        if not phone:
+            return None
+
+        wanted_name = str(
+            shop.get("name")
+            or ""
+        )
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    s.id,
+                    s.name,
+                    vf.budget_code,
+                    vf.budget_name,
+                    vf.budget_average,
+                    vf.private_room,
+                    vf.free_drink,
+                    vf.midnight,
+                    vf.karaoke,
+                    vf.private_room_raw,
+                    vf.free_drink_raw,
+                    vf.midnight_raw,
+                    vf.karaoke_raw,
+                    vf.source,
+                    vf.checked_at
+                FROM stores s
+                JOIN venue_features vf
+                  ON vf.store_id = s.id
+                WHERE REGEXP_REPLACE(
+                    COALESCE(s.phone, ''),
+                    '[^0-9]',
+                    '',
+                    'g'
+                ) = %s
+                  AND vf.checked_at
+                      >= NOW()
+                      - (
+                          %s
+                          * INTERVAL '1 day'
+                      )
+                ORDER BY s.id
+                """,
+                (
+                    phone,
+                    GOURMET_VENUE_FEATURES_MAX_AGE_DAYS,
+                ),
+            )
+
+            rows = cur.fetchall()
+
+        matches = []
+
+        for row in rows:
+
+            (
+                candidate_store_id,
+                candidate_name,
+                budget_code,
+                budget_name,
+                budget_average,
+                private_room,
+                free_drink,
+                midnight,
+                karaoke,
+                private_room_raw,
+                free_drink_raw,
+                midnight_raw,
+                karaoke_raw,
+                source,
+                checked_at,
+            ) = row
+
+            if not (
+                smoking_store_names_are_compatible(
+                    wanted_name,
+                    candidate_name,
+                )
+            ):
+                continue
+
+            matches.append(
+                {
+                    "budget_code": (
+                        budget_code
+                        or ""
+                    ),
+                    "budget_name": (
+                        budget_name
+                        or ""
+                    ),
+                    "budget_average": (
+                        budget_average
+                        or ""
+                    ),
+                    "private_room": private_room,
+                    "free_drink": free_drink,
+                    "midnight": midnight,
+                    "karaoke": karaoke,
+                    "private_room_raw": (
+                        private_room_raw
+                        or ""
+                    ),
+                    "free_drink_raw": (
+                        free_drink_raw
+                        or ""
+                    ),
+                    "midnight_raw": (
+                        midnight_raw
+                        or ""
+                    ),
+                    "karaoke_raw": (
+                        karaoke_raw
+                        or ""
+                    ),
+                    "source": (
+                        source
+                        or ""
+                    ),
+                    "checked_at": checked_at,
+                    "store_id": (
+                        candidate_store_id
+                    ),
+                    "match_type": (
+                        "phone_name_alias"
+                    ),
+                }
+            )
+
+        if len(matches) != 1:
+            return None
+
+        return matches[0]
+
+    except Exception as e:
+        print(
+            "Neon店舗属性読込エラー"
+            "（既存情報で継続）:",
+            e,
+        )
+        return None
+
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def enrich_shops_with_neon_venue_features(
+    shops,
+):
+    """
+    店舗候補の空欄属性だけ、
+    Neon venue_featuresで補完する。
+
+    既存のHot Pepper情報は上書きしない。
+    """
+
+    result = []
+
+    for shop in shops or []:
+
+        item = dict(shop)
+
+        info = (
+            get_neon_gourmet_venue_features(
+                item
+            )
+        )
+
+        if info is None:
+            result.append(item)
+            continue
+
+        text_keys = [
+            "budget_code",
+            "budget_name",
+            "budget_average",
+        ]
+
+        for key in text_keys:
+
+            existing = str(
+                item.get(
+                    key,
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not existing:
+
+                value = str(
+                    info.get(
+                        key,
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                if value:
+                    item[key] = value
+
+        bool_to_raw = {
+            "private_room":
+                "private_room_raw",
+            "free_drink":
+                "free_drink_raw",
+            "midnight":
+                "midnight_raw",
+            "karaoke":
+                "karaoke_raw",
+        }
+
+        for key, raw_key in (
+            bool_to_raw.items()
+        ):
+
+            existing_raw = str(
+                item.get(
+                    key,
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if existing_raw:
+                continue
+
+            raw_value = str(
+                info.get(
+                    raw_key,
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if raw_value:
+                item[key] = raw_value
+
+        item[
+            "venue_features_source"
+        ] = info.get(
+            "source",
+            "",
+        )
+
+        item[
+            "venue_features_match_type"
+        ] = info.get(
+            "match_type",
+            "",
+        )
+
+        item[
+            "venue_features_store_id"
+        ] = info.get(
+            "store_id"
+        )
+
+        print(
+            "Neon店舗属性補完: "
+            f"{item.get('name', '')} / "
+            f"{info.get('match_type', '')}"
+        )
+
+        result.append(item)
+
+    return result
+
+
 def normalize_hotpepper_smoking_status(
     raw_text,
 ):
@@ -4136,6 +4569,12 @@ def search_current_location_second_party(
 
     merged_results = (
         enrich_shops_with_neon_smoking_info(
+            merged_results
+        )
+    )
+
+    merged_results = (
+        enrich_shops_with_neon_venue_features(
             merged_results
         )
     )
