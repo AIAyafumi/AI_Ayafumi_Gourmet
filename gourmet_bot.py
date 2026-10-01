@@ -132,6 +132,10 @@ YAHOO_LOCAL_SEARCH_URL = (
 
 YAHOO_SEARCH_DISTANCE_METERS = 1500
 
+# Tavily営業確認・AI提示へ進める店舗候補の最大数。
+# 候補が大量でも全件へ高コスト処理を実施しない。
+GOURMET_CANDIDATE_POOL_LIMIT = 10
+
 
 # =========================================================
 # Flask
@@ -1053,6 +1057,70 @@ def filter_shops_by_station_distance(
 
     return filtered
 
+
+
+
+def select_gourmet_candidate_pool(
+    shops,
+    limit=GOURMET_CANDIDATE_POOL_LIMIT,
+):
+    """
+    高コスト処理へ進める店舗候補数を制御する。
+
+    上限以内なら現在の順序をそのまま維持する。
+    上限を超えた場合だけ、駅からの距離が分かる店舗を
+    近い順に優先し、距離不明店舗を後ろへ回す。
+    """
+
+    shops = list(shops or [])
+
+    if limit <= 0:
+        return []
+
+    if len(shops) <= limit:
+        return shops
+
+    indexed_shops = list(enumerate(shops))
+
+    def sort_key(item):
+        original_index, shop = item
+
+        distance = shop.get(
+            "station_distance",
+            None,
+        )
+
+        try:
+            if distance is not None:
+                return (
+                    0,
+                    float(distance),
+                    original_index,
+                )
+        except (TypeError, ValueError):
+            pass
+
+        return (
+            1,
+            float("inf"),
+            original_index,
+        )
+
+    indexed_shops.sort(
+        key=sort_key
+    )
+
+    selected = [
+        shop
+        for _, shop in indexed_shops[:limit]
+    ]
+
+    print(
+        f"候補数制御: "
+        f"{len(shops)}件 → {len(selected)}件"
+    )
+
+    return selected
 
 def get_shop_coordinates(shop):
     """
@@ -3384,7 +3452,21 @@ def build_gourmet_prompt(
         )
 
         # =================================================
-        # ⑧ 統合後にTavily確認
+        # ⑧ 高コスト処理前の候補数制御
+        # =================================================
+
+        merged_results = select_gourmet_candidate_pool(
+            merged_results,
+            limit=GOURMET_CANDIDATE_POOL_LIMIT,
+        )
+
+        print(
+            f"候補プール確定: "
+            f"{len(merged_results)}件"
+        )
+
+        # =================================================
+        # ⑨ 統合後にTavily確認
         # =================================================
 
         print(
