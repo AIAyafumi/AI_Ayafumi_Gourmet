@@ -889,6 +889,16 @@ SMOKING_OPTIONS = [
 ]
 
 
+SECOND_PARTY_SEARCH_TERMS = [
+    "居酒屋",
+    "バー",
+    "カラオケ",
+]
+
+
+CURRENT_LOCATION_SEARCH_RADIUS_METERS = 1000
+
+
 # =========================================================
 # 共通ユーティリティ
 # =========================================================
@@ -1813,6 +1823,367 @@ def select_gourmet_candidate_pool(
 
     return selected
 
+
+
+def deduplicate_gourmet_shops(
+    shops,
+):
+    """
+    APIや検索語をまたいだ重複店舗を除外する。
+    """
+
+    unique = []
+
+    for shop in shops or []:
+
+        if not shop:
+            continue
+
+        duplicate = False
+
+        for existing in unique:
+
+            if shops_are_same_store(
+                shop,
+                existing,
+            ):
+                duplicate = True
+                break
+
+        if duplicate:
+            continue
+
+        unique.append(shop)
+
+    return unique
+
+
+def is_second_party_genre_match(
+    shop,
+    search_term,
+):
+    """
+    API検索結果が二次会用途の対象ジャンルか確認する。
+
+    「バー」は部分一致すると
+    ハンバーガー・BARBER等を誤検出するため、
+    ジャンル情報を優先して厳密に判定する。
+    """
+
+    genre = normalize_text(
+        shop.get(
+            "genre",
+            "",
+        )
+    )
+
+    name = normalize_text(
+        shop.get(
+            "name",
+            "",
+        )
+    )
+
+    if search_term == "居酒屋":
+
+        keywords = [
+            "居酒屋",
+            "酒場",
+            "炉端",
+            "焼鳥",
+            "焼き鳥",
+            "ダイニングバー",
+            "ビアホール",
+            "バル",
+        ]
+
+        combined = (
+            f"{genre} {name}"
+        )
+
+        return any(
+            keyword in combined
+            for keyword in keywords
+        )
+
+    if search_term == "カラオケ":
+
+        keywords = [
+            "カラオケ",
+            "パーティ",
+            "パーティー",
+        ]
+
+        combined = (
+            f"{genre} {name}"
+        )
+
+        return any(
+            keyword in combined
+            for keyword in keywords
+        )
+
+    if search_term == "バー":
+
+        # ---------------------------------------------
+        # 明確な除外
+        # ---------------------------------------------
+
+        excluded_genre_keywords = [
+            "ハンバーガー",
+            "理容",
+            "美容",
+            "床屋",
+        ]
+
+        if any(
+            keyword in genre
+            for keyword in excluded_genre_keywords
+        ):
+            return False
+
+        upper_name = name.upper()
+
+        if (
+            "BARBER" in upper_name
+            or "バーバー" in name
+            or "バーガー" in name
+        ):
+            return False
+
+        # ---------------------------------------------
+        # ジャンル情報がある場合はジャンルを優先
+        # ---------------------------------------------
+
+        if genre:
+
+            strong_bar_genres = [
+                "ダイニングバー",
+                "ショットバー",
+                "ワインバー",
+                "スポーツバー",
+                "ビアバー",
+                "バー・お酒",
+                "バー、",
+                "バー,",
+                "バー／",
+                "バー/",
+                "パブ",
+                "スナック",
+                "ラウンジ",
+            ]
+
+            if genre == "バー":
+                return True
+
+            return any(
+                keyword in genre
+                for keyword in strong_bar_genres
+            )
+
+        # ---------------------------------------------
+        # ジャンル不明時のみ店名で補助判定
+        # ---------------------------------------------
+
+        strong_name_patterns = [
+            " BAR ",
+            " BAR",
+            "BAR ",
+            "Bar ",
+            " Bar",
+            "bar ",
+            " bar",
+            "ショットバー",
+            "ワインバー",
+            "スポーツバー",
+            "ビアバー",
+        ]
+
+        padded_name = (
+            f" {name} "
+        )
+
+        return any(
+            pattern in padded_name
+            for pattern in strong_name_patterns
+        )
+
+    return True
+
+
+def filter_second_party_results(
+    shops,
+    search_term,
+):
+    filtered = []
+
+    for shop in shops or []:
+
+        if is_second_party_genre_match(
+            shop,
+            search_term,
+        ):
+            filtered.append(shop)
+            continue
+
+        print(
+            f"    二次会ジャンル除外: "
+            f"{shop.get('name', '')} / "
+            f"{shop.get('genre', '')} / "
+            f"検索語={search_term}"
+        )
+
+    return filtered
+
+def search_current_location_second_party(
+    state,
+):
+    """
+    LINEで受け取った現在地を中心に、
+    二次会向け店舗を検索する。
+    """
+
+    latitude = state.get(
+        "latitude"
+    )
+
+    longitude = state.get(
+        "longitude"
+    )
+
+    if (
+        latitude is None
+        or longitude is None
+    ):
+        return []
+
+    center = (
+        float(latitude),
+        float(longitude),
+    )
+
+    hotpepper_results = []
+    yahoo_results = []
+
+    for search_term in SECOND_PARTY_SEARCH_TERMS:
+
+        hp_batch = (
+            search_hotpepper_by_coordinates(
+                center[0],
+                center[1],
+                keyword=search_term,
+                range_value=3,
+            )
+        )
+
+        hp_batch = (
+            filter_second_party_results(
+                hp_batch,
+                search_term,
+            )
+        )
+
+        hotpepper_results.extend(
+            hp_batch
+        )
+
+        yahoo_distance_km = (
+            CURRENT_LOCATION_SEARCH_RADIUS_METERS
+            / 1000.0
+        )
+
+        yahoo_batch = (
+            search_yahoo_local_by_coordinates(
+                center[0],
+                center[1],
+                query=search_term,
+                distance=yahoo_distance_km,
+            )
+        )
+
+        yahoo_batch = (
+            filter_second_party_results(
+                yahoo_batch,
+                search_term,
+            )
+        )
+
+        yahoo_results.extend(
+            yahoo_batch
+        )
+
+    hotpepper_results = (
+        deduplicate_gourmet_shops(
+            hotpepper_results
+        )
+    )
+
+    yahoo_results = (
+        deduplicate_gourmet_shops(
+            yahoo_results
+        )
+    )
+
+    print(
+        f"現在地検索取得: "
+        f"Hot Pepper={len(hotpepper_results)} / "
+        f"Yahoo={len(yahoo_results)}"
+    )
+
+    merged_results = merge_shop_results(
+        hotpepper_results,
+        yahoo_results,
+    )
+
+    merged_results = (
+        deduplicate_gourmet_shops(
+            merged_results
+        )
+    )
+
+    merged_results = (
+        filter_shops_by_station_distance(
+            merged_results,
+            center,
+            max_distance_meters=(
+                CURRENT_LOCATION_SEARCH_RADIUS_METERS
+            ),
+        )
+    )
+
+    merged_results = (
+        select_gourmet_candidate_pool(
+            merged_results,
+            limit=GOURMET_CANDIDATE_POOL_LIMIT,
+        )
+    )
+
+    merged_results = (
+        verify_shops_with_tavily(
+            merged_results
+        )
+    )
+
+    def distance_key(shop):
+
+        distance = shop.get(
+            "station_distance"
+        )
+
+        try:
+            if distance is not None:
+                return float(distance)
+        except (TypeError, ValueError):
+            pass
+
+        return float("inf")
+
+    merged_results.sort(
+        key=distance_key
+    )
+
+    return merged_results
+
 def get_shop_coordinates(shop):
     """
     店舗データから緯度経度を取得する。
@@ -2049,7 +2420,36 @@ def shops_are_same_store(
         return True
 
     # =====================================================
-    # ④ 店名表記揺れ + 座標近接
+    # ④ 座標近接 + 店名包含
+    # =====================================================
+
+    # 「はまる家」
+    # 「串焼き Bar はまる家」
+    # のように短い店名でも、
+    # 座標がほぼ同一で片方の名称を含む場合は
+    # 同一店舗候補として扱う。
+
+    if (
+        name1
+        and name2
+        and min(
+            len(name1),
+            len(name2),
+        ) >= 3
+        and (
+            name1 in name2
+            or name2 in name1
+        )
+        and coordinates_are_close(
+            shop1,
+            shop2,
+            threshold_meters=30,
+        )
+    ):
+        return True
+
+    # =====================================================
+    # ⑤ 店名表記揺れ + 座標近接
     # =====================================================
 
     if (
@@ -2068,7 +2468,7 @@ def shops_are_same_store(
         return True
 
     # =====================================================
-    # ⑤ 店名完全一致 + 座標近接
+    # ⑥ 店名完全一致 + 座標近接
     # =====================================================
 
     if (
@@ -2502,6 +2902,141 @@ def search_hotpepper(user_text):
 
     return results
 
+
+
+
+def search_hotpepper_by_coordinates(
+    latitude,
+    longitude,
+    keyword="",
+    range_value=3,
+):
+    """
+    Hot Pepperを緯度経度中心で検索する。
+
+    range_value=3 は約1000m。
+    """
+
+    if not HOTPEPPER_API_KEY:
+        print(
+            "HOTPEPPER_API_KEYが設定されていません。"
+        )
+        return []
+
+    params = {
+        "key": HOTPEPPER_API_KEY,
+        "lat": latitude,
+        "lng": longitude,
+        "range": range_value,
+        "format": "json",
+        "count": 10,
+        "order": 4,
+    }
+
+    if keyword:
+        params["keyword"] = keyword
+
+    try:
+        response = requests.get(
+            HOTPEPPER_URL,
+            params=params,
+            timeout=20,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+    except Exception as e:
+        print(
+            "Hot Pepper現在地検索エラー:",
+            e,
+        )
+        return []
+
+    shops = (
+        data.get("results", {})
+        .get("shop", [])
+    )
+
+    if isinstance(shops, dict):
+        shops = [shops]
+
+    results = []
+
+    for shop in shops:
+
+        results.append({
+            "name": shop.get(
+                "name",
+                "",
+            ),
+            "genre": (
+                shop.get("genre", {})
+                .get("name", "")
+            ),
+            "address": shop.get(
+                "address",
+                "",
+            ),
+            "station": shop.get(
+                "station_name",
+                "",
+            ),
+            "open": shop.get(
+                "open",
+                "",
+            ),
+            "close": shop.get(
+                "close",
+                "",
+            ),
+            "url": (
+                shop.get("urls", {})
+                .get("pc", "")
+            ),
+            "tel": shop.get(
+                "tel",
+                "",
+            ),
+            "lat": shop.get(
+                "lat",
+                "",
+            ),
+            "lng": shop.get(
+                "lng",
+                "",
+            ),
+            "non_smoking": shop.get(
+                "non_smoking",
+                "",
+            ),
+            "free_drink": shop.get(
+                "free_drink",
+                "",
+            ),
+            "private_room": shop.get(
+                "private_room",
+                "",
+            ),
+            "karaoke": shop.get(
+                "karaoke",
+                "",
+            ),
+            "midnight": shop.get(
+                "midnight",
+                "",
+            ),
+            "source": "Hot Pepper",
+        })
+
+    print(
+        f"Hot Pepper現在地検索: "
+        f"{keyword or '指定なし'} / "
+        f"{len(results)}件"
+    )
+
+    return results
 
 # =========================================================
 # Tavily
@@ -4055,6 +4590,59 @@ def format_merged_results(
                 f"{shop.get('distance', '')}"
             )
 
+        current_distance = shop.get(
+            "station_distance"
+        )
+
+        if current_distance is not None:
+            try:
+                lines.append(
+                    f"   現在地からの距離: "
+                    f"{float(current_distance):.0f}m"
+                )
+            except (TypeError, ValueError):
+                pass
+
+        if shop.get(
+            "non_smoking"
+        ):
+            lines.append(
+                f"   喫煙情報: "
+                f"{shop.get('non_smoking', '')}"
+            )
+
+        if shop.get(
+            "free_drink"
+        ):
+            lines.append(
+                f"   飲み放題: "
+                f"{shop.get('free_drink', '')}"
+            )
+
+        if shop.get(
+            "private_room"
+        ):
+            lines.append(
+                f"   個室: "
+                f"{shop.get('private_room', '')}"
+            )
+
+        if shop.get(
+            "karaoke"
+        ):
+            lines.append(
+                f"   カラオケ: "
+                f"{shop.get('karaoke', '')}"
+            )
+
+        if shop.get(
+            "midnight"
+        ):
+            lines.append(
+                f"   深夜営業: "
+                f"{shop.get('midnight', '')}"
+            )
+
         if shop.get("tavily_status"):
             lines.append(
                 f"   Tavily営業状況: "
@@ -4129,7 +4717,34 @@ def build_gourmet_prompt(
     yahoo_results = []
     merged_results = []
 
-    if should_search_hotpepper(
+    current_latitude = state.get(
+        "latitude"
+    )
+
+    current_longitude = state.get(
+        "longitude"
+    )
+
+    smoking = state.get(
+        "smoking",
+        "",
+    )
+
+    is_current_location_search = (
+        current_latitude is not None
+        and current_longitude is not None
+        and bool(smoking)
+    )
+
+    if is_current_location_search:
+
+        merged_results = (
+            search_current_location_second_party(
+                state
+            )
+        )
+
+    elif should_search_hotpepper(
         user_text
     ):
 
@@ -4259,8 +4874,11 @@ def build_gourmet_prompt(
         merged_results
     )
 
-    if should_search_hotpepper(
-        user_text
+    if (
+        is_current_location_search
+        or should_search_hotpepper(
+            user_text
+        )
     ):
         tavily_context = ""
     else:
@@ -4304,6 +4922,10 @@ def build_gourmet_prompt(
 
 【ユーザーの今回の依頼】
 {user_text}
+
+【現在地検索】
+現在地検索: {is_current_location_search}
+喫煙条件: {smoking}
 
 【過去の会話】
 {history_text}
@@ -4393,6 +5015,33 @@ def build_gourmet_prompt(
 25. 予算を条件として勝手に設定しないでください。
     店舗の価格情報が検索結果に存在する場合でも、
     価格だけを理由に候補から除外しないでください。
+
+26. 現在地検索の場合は二次会利用を前提にしてください。
+    居酒屋、バー、カラオケなどから、
+    現在地に近く二次会で使いやすい候補を優先してください。
+
+27. 現在地検索の場合、候補は原則3〜5店舗にしてください。
+
+28. 現在地からの距離が存在する場合は、
+    近さを重要な判断材料として扱ってください。
+
+29. 喫煙条件が「禁煙の店」の場合、
+    検索結果に禁煙の根拠がある店舗を優先してください。
+
+30. 喫煙条件が「喫煙できる店」の場合、
+    喫煙可能と確認できる根拠がある店舗を優先してください。
+
+31. 喫煙情報が不明な店舗については、
+    喫煙可・禁煙のどちらとも断定しないでください。
+
+32. 「どちらでも」の場合は、
+    喫煙条件を候補選定の必須条件にしないでください。
+
+33. 飲み放題、個室、カラオケ、深夜営業の情報が
+    検索結果に存在する場合は、二次会向きかの判断材料にしてください。
+
+34. LINE表示ではMarkdownの表を使わないでください。
+    店名ごとに短い文章で読みやすく整理してください。
 """
 
     return prompt
@@ -4820,13 +5469,54 @@ def handle_search_selection(
         state["smoking"] = user_text
         state["step"] = "location_search_ready"
 
+        search_text = (
+            f"現在地から近い二次会候補を探す。"
+            f"喫煙条件は{user_text}。"
+        )
+
+        add_conversation_history(
+            user_id,
+            "user",
+            search_text,
+        )
+
         reply_text(
             reply_token,
-            (
-                f"喫煙条件は「{user_text}」ですね。\n"
-                "現在地から近い二次会候補を探す準備ができました。"
-            ),
+            "現在地から二次会候補を探しています。少々お待ちください…",
         )
+
+        answer = ask_gourmet_ai(
+            user_id,
+            search_text,
+        )
+
+        add_conversation_history(
+            user_id,
+            "assistant",
+            answer,
+        )
+
+        reset_search_state(
+            user_id
+        )
+
+        try:
+
+            push_text(
+                user_id,
+                answer,
+            )
+
+            print(
+                "LINE現在地検索回答送信成功"
+            )
+
+        except Exception as e:
+
+            print(
+                "LINE現在地検索Pushエラー:",
+                e,
+            )
 
         return
     # =====================================================
