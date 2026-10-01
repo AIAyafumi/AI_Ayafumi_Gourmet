@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 import json
 import re
 import math
@@ -61,6 +62,59 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 TAVILY_URL = "https://api.tavily.com/search"
+
+# Tavilyが利用上限HTTP 432を返した場合、
+# 同じRenderプロセスからの無駄な再試行を一定時間停止する。
+TAVILY_432_COOLDOWN_SECONDS = max(
+    60,
+    int(os.getenv("TAVILY_432_COOLDOWN_SECONDS", "900")),
+)
+_TAVILY_432_BLOCK_UNTIL = 0.0
+_TAVILY_432_LOCK = threading.Lock()
+
+
+def _tavily_432_remaining_seconds():
+    """Tavily HTTP 432クールダウンの残り秒数を返す。"""
+    with _TAVILY_432_LOCK:
+        remaining = (
+            _TAVILY_432_BLOCK_UNTIL
+            - time.monotonic()
+        )
+
+    return max(0.0, remaining)
+
+
+def _mark_tavily_432():
+    """Tavily HTTP 432検出時にクールダウンを開始する。"""
+    global _TAVILY_432_BLOCK_UNTIL
+
+    with _TAVILY_432_LOCK:
+        _TAVILY_432_BLOCK_UNTIL = max(
+            _TAVILY_432_BLOCK_UNTIL,
+            time.monotonic()
+            + TAVILY_432_COOLDOWN_SECONDS,
+        )
+
+    print(
+        f"Tavily 432サーキットブレーカーON: "
+        f"{TAVILY_432_COOLDOWN_SECONDS}秒間停止"
+    )
+
+
+def _should_skip_tavily(label="Tavily"):
+    """432クールダウン中ならTavily呼び出しを省略する。"""
+    remaining = _tavily_432_remaining_seconds()
+
+    if remaining <= 0:
+        return False
+
+    print(
+        f"{label}は432クールダウン中のため省略 "
+        f"(残り約{max(1, int(remaining))}秒)"
+    )
+
+    return True
+
 
 HOTPEPPER_URL = (
     "https://webservice.recruit.co.jp/"
@@ -1653,6 +1707,9 @@ def search_tavily(
         )
         return []
 
+    if _should_skip_tavily("Tavily"):
+        return []
+
     payload = {
         "api_key": TAVILY_API_KEY,
         "query": query,
@@ -1668,6 +1725,16 @@ def search_tavily(
             json=payload,
             timeout=20,
         )
+
+        if response.status_code == 432:
+            _mark_tavily_432()
+
+            print(
+                "Tavily HTTP 432: "
+                "利用上限のため検索を省略します。"
+            )
+
+            return []
 
         response.raise_for_status()
 
