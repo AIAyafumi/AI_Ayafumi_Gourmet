@@ -643,11 +643,32 @@ def save_neon_gourmet_status_cache(
 ):
     """
     営業確認結果をNeonへTTL付きで保存する。
+
+    住所も座標も取得できていない候補は、
+    店舗同定が弱いためNeonへ永続保存しない。
     """
     if not isinstance(
         verification,
         dict,
     ):
+        return False
+
+    address = str(
+        shop.get("address")
+        or ""
+    ).strip()
+
+    coordinates = (
+        _get_gourmet_db_coordinates(
+            shop
+        )
+    )
+
+    if not address and not coordinates:
+        print(
+            f"Neon保存省略（店舗同定情報不足）: "
+            f"{shop.get('name', '')}"
+        )
         return False
 
     status = str(
@@ -1221,6 +1242,14 @@ def extract_possible_shop_name_from_title(title):
     if map_match:
         value = map_match.group(1).strip()
 
+    # Tavily等のタイトル末尾に付く管理番号を除去
+    # 例: 店名(1539) / 店名（1539）
+    value = re.sub(
+        r"\s*[\(（]\d+[\)）]\s*$",
+        "",
+        value,
+    ).strip()
+
     # 明らかなメニュー情報を店舗名として扱わない
     menu_price_pattern = re.search(
         r"\d+(?:\.\d+)?\s*円",
@@ -1330,6 +1359,15 @@ def search_web_shop_candidates(
         "X",
     }
 
+    non_store_name_patterns = [
+        "予約・クーポン",
+        "予約・口コミ",
+        "飲食店検索",
+        "店舗一覧",
+        "お店一覧",
+        "グルメ情報",
+    ]
+
     for query in queries:
         try:
             results = search_tavily(query)
@@ -1402,6 +1440,15 @@ def search_web_shop_candidates(
                 ):
                     print(
                         f"    Web候補除外（店舗名ではない）: {shop_name}"
+                    )
+                    continue
+
+                if any(
+                    pattern in shop_name
+                    for pattern in non_store_name_patterns
+                ):
+                    print(
+                        f"    Web候補除外（検索・予約ページ）: {shop_name}"
                     )
                     continue
 
@@ -1507,10 +1554,6 @@ def enrich_web_candidate_with_yahoo(
                 break
 
         if selected:
-            break
-
-        if results:
-            selected = results[0]
             break
 
     if not selected:
