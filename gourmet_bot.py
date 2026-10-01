@@ -4945,6 +4945,222 @@ def format_hotpepper_results(
 # グルメAIプロンプト
 # =========================================================
 
+def format_current_location_line_answer(
+    shops,
+    smoking_condition,
+    max_shops=5,
+):
+    """
+    現在地検索の結果を、
+    AIに再解釈させず確定データから直接LINE文へ整形する。
+    """
+
+    if not shops:
+        return (
+            "現在地の近くで条件に合う二次会候補を"
+            "見つけられませんでした。\n"
+            "条件を変えるか、別のエリアで試してください。"
+        )
+
+    lines = []
+
+    if smoking_condition == "喫煙できる店":
+        title = (
+            "二次会におすすめの喫煙可能／近隣候補"
+            "（現在地からの距離）"
+        )
+    elif smoking_condition == "禁煙の店":
+        title = (
+            "二次会におすすめの禁煙／近隣候補"
+            "（現在地からの距離）"
+        )
+    else:
+        title = (
+            "二次会におすすめの近隣候補"
+            "（現在地からの距離）"
+        )
+
+    lines.append(title)
+
+    selected = list(
+        shops[:max_shops]
+    )
+
+    for index, shop in enumerate(
+        selected,
+        start=1,
+    ):
+        lines.append("")
+        lines.append(
+            f"{index}. "
+            f"{shop.get('name', '').strip()}"
+        )
+
+        distance = shop.get(
+            "station_distance"
+        )
+
+        try:
+            if distance is not None:
+                lines.append(
+                    "距離：現在地から約"
+                    f"{float(distance):.0f}m"
+                )
+        except (TypeError, ValueError):
+            pass
+
+        smoking_text = str(
+            shop.get(
+                "non_smoking",
+                ""
+            )
+            or ""
+        ).strip()
+
+        match_level = str(
+            shop.get(
+                "smoking_match_level",
+                ""
+            )
+            or ""
+        ).strip()
+
+        if smoking_text:
+            lines.append(
+                f"喫煙情報：{smoking_text}"
+            )
+        else:
+            if match_level == "unknown":
+                lines.append(
+                    "喫煙情報：不明（参考候補）"
+                )
+            else:
+                lines.append(
+                    "喫煙情報：不明"
+                )
+
+        features = []
+
+        free_drink = str(
+            shop.get(
+                "free_drink",
+                ""
+            )
+            or ""
+        ).strip()
+
+        private_room = str(
+            shop.get(
+                "private_room",
+                ""
+            )
+            or ""
+        ).strip()
+
+        karaoke = str(
+            shop.get(
+                "karaoke",
+                ""
+            )
+            or ""
+        ).strip()
+
+        midnight = str(
+            shop.get(
+                "midnight",
+                ""
+            )
+            or ""
+        ).strip()
+
+        if free_drink:
+            if (
+                "あり" in free_drink
+                or "有" in free_drink
+            ):
+                features.append(
+                    "飲み放題あり"
+                )
+
+        if private_room:
+            if (
+                "あり" in private_room
+                or "有" in private_room
+            ):
+                features.append(
+                    "個室あり"
+                )
+
+        if karaoke:
+            if (
+                "あり" in karaoke
+                or "有" in karaoke
+            ):
+                features.append(
+                    "カラオケあり"
+                )
+
+        if midnight:
+            if (
+                "営業している" in midnight
+                or "あり" in midnight
+                or "有" in midnight
+            ):
+                features.append(
+                    "深夜営業"
+                )
+
+        # 重複除去しつつ順序保持
+        feature_seen = set()
+        feature_list = []
+
+        for feature in features:
+            if feature in feature_seen:
+                continue
+
+            feature_seen.add(feature)
+            feature_list.append(
+                feature
+            )
+
+        if feature_list:
+            lines.append(
+                "特徴："
+                + "・".join(feature_list)
+            )
+
+        url = str(
+            shop.get(
+                "url",
+                ""
+            )
+            or ""
+        ).strip()
+
+        if url:
+            lines.append(
+                f"URL：{url}"
+            )
+
+    unknown_count = sum(
+        1
+        for shop in selected
+        if shop.get(
+            "smoking_match_level"
+        ) == "unknown"
+    )
+
+    if unknown_count:
+        lines.append("")
+        lines.append(
+            "※喫煙情報が不明な店舗は参考候補です。"
+        )
+
+    return "\n".join(
+        lines
+    ).strip()
+
+
 def build_gourmet_prompt(
     user_id,
     user_text,
@@ -5828,9 +6044,18 @@ def handle_search_selection(
             "現在地から二次会候補を探しています。少々お待ちください…",
         )
 
-        answer = ask_gourmet_ai(
-            user_id,
-            search_text,
+        shops = (
+            search_current_location_second_party(
+                state
+            )
+        )
+
+        answer = (
+            format_current_location_line_answer(
+                shops,
+                user_text,
+                max_shops=5,
+            )
         )
 
         add_conversation_history(
