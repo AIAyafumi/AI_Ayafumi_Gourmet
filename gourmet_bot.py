@@ -2035,6 +2035,206 @@ def filter_second_party_results(
 
     return filtered
 
+def classify_smoking_condition(
+    shop,
+    smoking_condition,
+):
+    """
+    店舗の喫煙情報を、
+    現在地検索で選択された喫煙条件に対して分類する。
+
+    戻り値:
+        match    : 条件一致
+        partial  : 一部条件に合う
+        unknown  : 情報不足
+        conflict : 条件と明確に矛盾
+        neutral  : 条件指定なし
+    """
+
+    if smoking_condition == "どちらでも":
+        return "neutral"
+
+    smoking_text = normalize_text(
+        shop.get(
+            "non_smoking",
+            "",
+        )
+    )
+
+    if not smoking_text:
+        return "unknown"
+
+    full_non_smoking_keywords = [
+        "全面禁煙",
+        "全席禁煙",
+        "完全禁煙",
+    ]
+
+    smoking_allowed_keywords = [
+        "禁煙席なし",
+        "全席喫煙可",
+        "喫煙可",
+        "喫煙席あり",
+    ]
+
+    partial_keywords = [
+        "一部禁煙",
+    ]
+
+    if smoking_condition == "喫煙できる店":
+
+        if any(
+            keyword in smoking_text
+            for keyword in full_non_smoking_keywords
+        ):
+            return "conflict"
+
+        if any(
+            keyword in smoking_text
+            for keyword in smoking_allowed_keywords
+        ):
+            return "match"
+
+        if any(
+            keyword in smoking_text
+            for keyword in partial_keywords
+        ):
+            return "partial"
+
+        return "unknown"
+
+    if smoking_condition == "禁煙の店":
+
+        if any(
+            keyword in smoking_text
+            for keyword in smoking_allowed_keywords
+        ):
+            return "conflict"
+
+        if any(
+            keyword in smoking_text
+            for keyword in full_non_smoking_keywords
+        ):
+            return "match"
+
+        if any(
+            keyword in smoking_text
+            for keyword in partial_keywords
+        ):
+            return "partial"
+
+        return "unknown"
+
+    return "neutral"
+
+
+def smoking_match_label(level):
+    labels = {
+        "match": "条件一致",
+        "partial": "一部条件に合う",
+        "unknown": "喫煙情報不明（参考候補）",
+        "conflict": "条件不一致",
+        "neutral": "条件指定なし",
+    }
+
+    return labels.get(
+        level,
+        "喫煙情報不明（参考候補）",
+    )
+
+
+def prioritize_smoking_candidates(
+    shops,
+    smoking_condition,
+    limit=GOURMET_CANDIDATE_POOL_LIMIT,
+):
+    """
+    現在地検索の候補を喫煙条件で整理する。
+
+    条件一致 → 一部条件に合う → 情報不明
+    の順で採用し、明確な条件不一致は除外する。
+
+    「どちらでも」の場合は喫煙条件では絞らない。
+    """
+
+    if not shops:
+        return []
+
+    if smoking_condition == "どちらでも":
+
+        result = []
+
+        for shop in shops:
+            item = dict(shop)
+            item["smoking_match_level"] = "neutral"
+            item["smoking_match_label"] = (
+                smoking_match_label(
+                    "neutral"
+                )
+            )
+            result.append(item)
+
+        return result[:limit]
+
+    buckets = {
+        "match": [],
+        "partial": [],
+        "unknown": [],
+        "conflict": [],
+    }
+
+    for shop in shops:
+
+        item = dict(shop)
+
+        level = classify_smoking_condition(
+            item,
+            smoking_condition,
+        )
+
+        item["smoking_match_level"] = level
+        item["smoking_match_label"] = (
+            smoking_match_label(
+                level
+            )
+        )
+
+        buckets[level].append(
+            item
+        )
+
+    selected = []
+
+    for level in [
+        "match",
+        "partial",
+        "unknown",
+    ]:
+        for item in buckets[level]:
+
+            if len(selected) >= limit:
+                break
+
+            selected.append(
+                item
+            )
+
+        if len(selected) >= limit:
+            break
+
+    print(
+        "喫煙条件候補整理: "
+        f"条件={smoking_condition} / "
+        f"一致={len(buckets['match'])} / "
+        f"一部一致={len(buckets['partial'])} / "
+        f"不明={len(buckets['unknown'])} / "
+        f"除外={len(buckets['conflict'])} / "
+        f"採用={len(selected)}"
+    )
+
+    return selected
+
+
 def search_current_location_second_party(
     state,
 ):
@@ -2152,6 +2352,17 @@ def search_current_location_second_party(
     )
 
     merged_results = (
+        prioritize_smoking_candidates(
+            merged_results,
+            state.get(
+                "smoking",
+                "どちらでも",
+            ),
+            limit=GOURMET_CANDIDATE_POOL_LIMIT,
+        )
+    )
+
+    merged_results = (
         select_gourmet_candidate_pool(
             merged_results,
             limit=GOURMET_CANDIDATE_POOL_LIMIT,
@@ -2178,11 +2389,29 @@ def search_current_location_second_party(
 
         return float("inf")
 
+    smoking_rank = {
+        "match": 0,
+        "partial": 1,
+        "unknown": 2,
+        "neutral": 0,
+        "conflict": 9,
+    }
+
     merged_results.sort(
-        key=distance_key
+        key=lambda shop: (
+            smoking_rank.get(
+                shop.get(
+                    "smoking_match_level",
+                    "unknown",
+                ),
+                2,
+            ),
+            distance_key(shop),
+        )
     )
 
     return merged_results
+
 
 def get_shop_coordinates(shop):
     """
@@ -4540,6 +4769,7 @@ def merge_shop_results(
 
 def format_merged_results(
     results,
+    current_location_search=False,
 ):
     if not results:
         return "店舗検索結果なし"
@@ -4574,7 +4804,10 @@ def format_merged_results(
                 f"{shop.get('address', '')}"
             )
 
-        if shop.get("station"):
+        if (
+            not current_location_search
+            and shop.get("station")
+        ):
             lines.append(
                 f"   最寄駅: "
                 f"{shop.get('station', '')}"
@@ -4586,7 +4819,10 @@ def format_merged_results(
                 f"{shop.get('open', '')}"
             )
 
-        if shop.get("distance"):
+        if (
+            not current_location_search
+            and shop.get("distance")
+        ):
             lines.append(
                 f"   距離: "
                 f"{shop.get('distance', '')}"
@@ -4598,8 +4834,14 @@ def format_merged_results(
 
         if current_distance is not None:
             try:
+                distance_label = (
+                    "現在地からの距離"
+                    if current_location_search
+                    else "基準地点からの距離"
+                )
+
                 lines.append(
-                    f"   現在地からの距離: "
+                    f"   {distance_label}: "
                     f"{float(current_distance):.0f}m"
                 )
             except (TypeError, ValueError):
@@ -4611,6 +4853,17 @@ def format_merged_results(
             lines.append(
                 f"   喫煙情報: "
                 f"{shop.get('non_smoking', '')}"
+            )
+
+        if (
+            current_location_search
+            and shop.get(
+                "smoking_match_label"
+            )
+        ):
+            lines.append(
+                f"   喫煙条件判定: "
+                f"{shop.get('smoking_match_label', '')}"
             )
 
         if shop.get(
@@ -4873,7 +5126,10 @@ def build_gourmet_prompt(
         )
 
     merged_context = format_merged_results(
-        merged_results
+        merged_results,
+        current_location_search=(
+            is_current_location_search
+        ),
     )
 
     if (
@@ -5027,6 +5283,17 @@ def build_gourmet_prompt(
 28. 現在地からの距離が存在する場合は、
     近さを重要な判断材料として扱ってください。
 
+28-1. 現在地検索の場合、
+    店舗までの距離は検索結果の
+    「現在地からの距離」をそのまま使用してください。
+    最寄駅からの距離や徒歩分数へ変換しないでください。
+    「現在地から約580m」のように表示してください。
+
+28-2. 現在地検索の場合、
+    「○○駅から徒歩○分」のような表現は使用しないでください。
+    ユーザーが駅からの距離を明示的に尋ねた場合を除き、
+    現在地基準で説明してください。
+
 29. 喫煙条件が「禁煙の店」の場合、
     検索結果に禁煙の根拠がある店舗を優先してください。
 
@@ -5035,6 +5302,15 @@ def build_gourmet_prompt(
 
 31. 喫煙情報が不明な店舗については、
     喫煙可・禁煙のどちらとも断定しないでください。
+
+31-0. 現在地検索では、
+    検索結果の「喫煙条件判定」を必ず確認してください。
+    「条件一致」を最優先し、
+    次に「一部条件に合う」を扱ってください。
+    「喫煙情報不明（参考候補）」は、
+    条件一致候補だけでは店舗数が足りない場合の
+    参考候補としてのみ紹介してください。
+    参考候補を喫煙可能・禁煙と断定しないでください。
 
 31-1. 検索結果の「喫煙情報」は、
     原文の意味を変えずに扱ってください。
@@ -5340,81 +5616,72 @@ def ask_openrouter(prompt):
 # =========================================================
 
 def clean_answer(answer):
-    """
-    AI回答をLINEのプレーンテキスト向けに整形する。
-    """
+    text = str(answer or "").strip()
 
-    if not answer:
-        return ""
-
-    answer = str(
-        answer
-    ).strip()
-
-    # HTML風改行
-    answer = re.sub(
+    text = re.sub(
         r"<br\s*/?>",
         "\n",
-        answer,
+        text,
         flags=re.IGNORECASE,
     )
 
-    # <https://example.com> → https://example.com
-    answer = re.sub(
+    text = re.sub(
         r"<(https?://[^>]+)>",
         r"\1",
-        answer,
+        text,
     )
 
-    # [表示名](URL) → 表示名\nURL
-    answer = re.sub(
+    text = re.sub(
         r"\[([^\]]+)\]\((https?://[^)]+)\)",
         r"\1\n\2",
-        answer,
+        text,
     )
 
-    # Markdown見出し
-    answer = re.sub(
-        r"(?m)^#{1,6}\s*",
+    text = re.sub(
+        r"(?m)^\s*#{1,6}\s*",
         "",
-        answer,
+        text,
     )
 
-    # Markdown太字
-    answer = answer.replace(
-        "**",
+    text = text.replace("**", "")
+    text = text.replace("__", "")
+
+    # LINEではMarkdownが装飾されず、そのまま見えるため
+    # 行頭の引用記号や単独の強調記号だけ除去する。
+    text = re.sub(
+        r"(?m)^\s*>\s*",
         "",
+        text,
     )
 
-    answer = answer.replace(
-        "__",
+    text = re.sub(
+        r"(?m)^\s*[-*+]\s+",
         "",
+        text,
     )
 
-    # コードブロック記号
-    answer = answer.replace(
-        "```text",
-        "",
+    text = re.sub(
+        r"(?<!\w)\*([^*\n]+)\*(?!\w)",
+        r"\1",
+        text,
     )
 
-    answer = answer.replace(
-        "```",
-        "",
+    text = re.sub(
+        r"(?<!\w)_([^_\n]+)_(?!\w)",
+        r"\1",
+        text,
     )
 
-    # 不要な連続空行を整理
-    answer = re.sub(
+    text = text.replace("```text", "")
+    text = text.replace("```", "")
+
+    text = re.sub(
         r"\n{3,}",
         "\n\n",
-        answer,
+        text,
     )
 
-    return answer.strip()
-
-
-# =========================================================
-# グルメAI本体
-# =========================================================
+    return text.strip()
 
 def ask_gourmet_ai(
     user_id,
