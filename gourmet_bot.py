@@ -4432,6 +4432,460 @@ def prioritize_smoking_candidates(
     return selected
 
 
+def classify_second_party_candidate_category(
+    shop,
+):
+    """
+    現在地検索候補を
+    居酒屋 / バー / カラオケ / その他
+    に分類する。
+
+    検索時の広い許容判定とは分離し、
+    実際の候補カテゴリはより厳密に判定する。
+    """
+
+    genre = str(
+        shop.get(
+            "genre",
+            "",
+        )
+        or ""
+    ).strip()
+
+    name = str(
+        shop.get(
+            "name",
+            "",
+        )
+        or ""
+    ).strip()
+
+    source = str(
+        shop.get(
+            "source",
+            "",
+        )
+        or ""
+    ).strip()
+
+    combined = (
+        f"{genre} {name}"
+    )
+
+    upper_name = (
+        name.upper()
+    )
+
+    # -----------------------------------------------------
+    # 1. カラオケ
+    #
+    # 「パーティースペース」だけでは
+    # カラオケ扱いしない。
+    # -----------------------------------------------------
+
+    karaoke_keywords = [
+        "カラオケ",
+        "JOYSOUND",
+        "BIG ECHO",
+        "ビッグエコー",
+        "歌広場",
+        "まねきねこ",
+        "BANBAN",
+    ]
+
+    if any(
+        keyword.upper()
+        in upper_name
+        or keyword in genre
+        for keyword in karaoke_keywords
+    ):
+        return "カラオケ"
+
+    # -----------------------------------------------------
+    # 2. Yahoo!の明確なファミレス系は
+    # ダイニングバー表記だけでバー扱いしない。
+    # -----------------------------------------------------
+
+    if (
+        source.startswith(
+            "Yahoo!"
+        )
+        and "ファミレス" in genre
+        and not any(
+            keyword in combined
+            for keyword in [
+                "居酒屋",
+                "酒場",
+                "焼鳥",
+                "焼き鳥",
+            ]
+        )
+    ):
+        return "その他"
+
+    # -----------------------------------------------------
+    # 3. バー
+    # -----------------------------------------------------
+
+    bar_genre_keywords = [
+        "バー・カクテル",
+        "ダイニングバー",
+        "ショットバー",
+        "ワインバー",
+        "スポーツバー",
+        "ビアバー",
+        "ダーツバー",
+        "バー,",
+        "バー、",
+        "バー／",
+        "バー/",
+        "バル",
+        "バール",
+        "パブ",
+        "スナック",
+        "ラウンジ",
+    ]
+
+    if genre == "バー":
+        return "バー"
+
+    if any(
+        keyword in genre
+        for keyword in bar_genre_keywords
+    ):
+        return "バー"
+
+    explicit_bar_name_patterns = [
+        " BAR ",
+        " BAR",
+        "BAR ",
+        "バー",
+    ]
+
+    padded_upper_name = (
+        f" {upper_name} "
+    )
+
+    if any(
+        pattern.upper()
+        in padded_upper_name
+        for pattern in explicit_bar_name_patterns
+    ):
+        return "バー"
+
+    # -----------------------------------------------------
+    # 4. 居酒屋
+    # -----------------------------------------------------
+
+    izakaya_keywords = [
+        "居酒屋",
+        "酒場",
+        "炉端",
+        "焼鳥",
+        "焼き鳥",
+        "ビアホール",
+    ]
+
+    if any(
+        keyword in combined
+        for keyword in izakaya_keywords
+    ):
+        return "居酒屋"
+
+    return "その他"
+
+
+def select_current_location_candidate_pool(
+    shops,
+    limit=GOURMET_CANDIDATE_POOL_LIMIT,
+):
+    """
+    現在地検索専用の候補プール選定。
+
+    優先順位:
+        1. smoking_match_level
+        2. category diversity
+        3. Hot Pepper由来
+        4. distance
+
+    居酒屋 / バー / カラオケを
+    ラウンドロビンし、
+    Hot Pepperで不足する場合に
+    Yahoo!候補を補完する。
+    """
+
+    shops = list(
+        shops or []
+    )
+
+    if limit <= 0:
+        return []
+
+    if not shops:
+        return []
+
+    smoking_levels = [
+        "match",
+        "partial",
+        "unknown",
+        "neutral",
+    ]
+
+    category_order = [
+        "居酒屋",
+        "バー",
+        "カラオケ",
+    ]
+
+    def candidate_sort_key(
+        indexed_shop,
+    ):
+        original_index, shop = (
+            indexed_shop
+        )
+
+        source = str(
+            shop.get(
+                "source",
+                "",
+            )
+            or ""
+        )
+
+        # Hot Pepper単独または
+        # Hot Pepper + Yahoo!統合店舗を優先。
+        source_rank = (
+            0
+            if "Hot Pepper" in source
+            else 1
+        )
+
+        distance = shop.get(
+            "station_distance"
+        )
+
+        try:
+            if distance is not None:
+                return (
+                    source_rank,
+                    0,
+                    float(distance),
+                    original_index,
+                )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            pass
+
+        return (
+            source_rank,
+            1,
+            float("inf"),
+            original_index,
+        )
+
+    indexed = list(
+        enumerate(
+            shops
+        )
+    )
+
+    selected = []
+
+    for smoking_level in smoking_levels:
+
+        level_items = [
+            item
+            for item in indexed
+            if (
+                item[1].get(
+                    "smoking_match_level",
+                    "unknown",
+                )
+                == smoking_level
+            )
+        ]
+
+        if not level_items:
+            continue
+
+        category_buckets = {
+            category: []
+            for category in category_order
+        }
+
+        other_items = []
+
+        for item in level_items:
+
+            category = (
+                classify_second_party_candidate_category(
+                    item[1]
+                )
+            )
+
+            if category in category_buckets:
+                category_buckets[
+                    category
+                ].append(
+                    item
+                )
+            else:
+                other_items.append(
+                    item
+                )
+
+        for category in category_order:
+
+            category_buckets[
+                category
+            ].sort(
+                key=candidate_sort_key
+            )
+
+        other_items.sort(
+            key=candidate_sort_key
+        )
+
+        positions = {
+            category: 0
+            for category in category_order
+        }
+
+        while (
+            len(selected)
+            < limit
+        ):
+
+            added = False
+
+            for category in category_order:
+
+                position = positions[
+                    category
+                ]
+
+                bucket = category_buckets[
+                    category
+                ]
+
+                if position >= len(
+                    bucket
+                ):
+                    continue
+
+                selected.append(
+                    bucket[
+                        position
+                    ][1]
+                )
+
+                positions[
+                    category
+                ] += 1
+
+                added = True
+
+                if (
+                    len(selected)
+                    >= limit
+                ):
+                    break
+
+            if not added:
+                break
+
+        if len(selected) < limit:
+
+            for _, shop in other_items:
+
+                selected.append(
+                    shop
+                )
+
+                if (
+                    len(selected)
+                    >= limit
+                ):
+                    break
+
+        if (
+            len(selected)
+            >= limit
+        ):
+            break
+
+    print(
+        "現在地候補カテゴリ分散: "
+        f"{len(shops)}件 → "
+        f"{len(selected)}件"
+    )
+
+    category_counts = {
+        "居酒屋": 0,
+        "バー": 0,
+        "カラオケ": 0,
+        "その他": 0,
+    }
+
+    source_counts = {
+        "Hot Pepper": 0,
+        "Yahoo": 0,
+    }
+
+    for shop in selected:
+
+        category = (
+            classify_second_party_candidate_category(
+                shop
+            )
+        )
+
+        category_counts[
+            category
+        ] = (
+            category_counts.get(
+                category,
+                0,
+            )
+            + 1
+        )
+
+        source = str(
+            shop.get(
+                "source",
+                "",
+            )
+            or ""
+        )
+
+        if "Hot Pepper" in source:
+            source_counts[
+                "Hot Pepper"
+            ] += 1
+        else:
+            source_counts[
+                "Yahoo"
+            ] += 1
+
+    print(
+        "カテゴリ内訳: "
+        f"居酒屋={category_counts['居酒屋']} / "
+        f"バー={category_counts['バー']} / "
+        f"カラオケ={category_counts['カラオケ']} / "
+        f"その他={category_counts['その他']}"
+    )
+
+    print(
+        "候補ソース内訳: "
+        f"Hot Pepper={source_counts['Hot Pepper']} / "
+        f"Yahoo={source_counts['Yahoo']}"
+    )
+
+    return selected
+
+
 def search_current_location_second_party(
     state,
 ):
@@ -4618,12 +5072,12 @@ def search_current_location_second_party(
                     "smoking",
                     "どちらでも",
                 ),
-                limit=GOURMET_CANDIDATE_POOL_LIMIT,
+                limit=len(merged_results),
             )
         )
 
         merged_results = (
-            select_gourmet_candidate_pool(
+            select_current_location_candidate_pool(
                 merged_results,
                 limit=GOURMET_CANDIDATE_POOL_LIMIT,
             )
@@ -4640,41 +5094,13 @@ def search_current_location_second_party(
         if neon_read_conn is not None:
             neon_read_conn.close()
 
-    def distance_key(shop):
-
-        distance = shop.get(
-            "station_distance"
-        )
-
-        try:
-            if distance is not None:
-                return float(distance)
-        except (TypeError, ValueError):
-            pass
-
-        return float("inf")
-
-    smoking_rank = {
-        "match": 0,
-        "partial": 1,
-        "unknown": 2,
-        "neutral": 0,
-        "conflict": 9,
-    }
-
-    merged_results.sort(
-        key=lambda shop: (
-            smoking_rank.get(
-                shop.get(
-                    "smoking_match_level",
-                    "unknown",
-                ),
-                2,
-            ),
-            distance_key(shop),
-        )
-    )
-
+    # 候補プールですでに
+    # 喫煙条件 → カテゴリ分散 → カテゴリ内距離
+    # の優先順位を確定している。
+    #
+    # ここで全体を距離順に再ソートすると、
+    # LINE上位5件のカテゴリ分散が崩れるため、
+    # 選定済みの順序をそのまま維持する。
     return merged_results
 
 
