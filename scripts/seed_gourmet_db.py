@@ -52,10 +52,18 @@ def parse_args():
 
     parser.add_argument(
         "--area",
-        required=True,
         help=(
-            "ログ表示用のエリア名 "
-            "例: Tachikawa"
+            "ログ表示用のエリア名。"
+            "--location指定時は省略可能"
+        ),
+    )
+
+    parser.add_argument(
+        "--location",
+        help=(
+            "駅名・エリア名からYahoo!で"
+            "検索中心座標を自動取得する。"
+            "例: 八王子"
         ),
     )
 
@@ -63,7 +71,6 @@ def parse_args():
         "--lat",
         "--latitude",
         dest="latitude",
-        required=True,
         type=float,
         help="検索中心の緯度",
     )
@@ -72,7 +79,6 @@ def parse_args():
         "--lon",
         "--longitude",
         dest="longitude",
-        required=True,
         type=float,
         help="検索中心の経度",
     )
@@ -147,6 +153,53 @@ def parse_args():
     )
 
     args = parser.parse_args()
+
+    has_location = bool(
+        str(
+            args.location
+            or ""
+        ).strip()
+    )
+
+    has_latitude = (
+        args.latitude
+        is not None
+    )
+
+    has_longitude = (
+        args.longitude
+        is not None
+    )
+
+    if has_location and (
+        has_latitude
+        or has_longitude
+    ):
+        parser.error(
+            "--location と "
+            "--lat/--lon は"
+            "同時指定できません"
+        )
+
+    if (
+        not has_location
+        and not has_latitude
+        and not has_longitude
+    ):
+        parser.error(
+            "--location または "
+            "--lat と --lon を"
+            "指定してください"
+        )
+
+    if (
+        has_latitude
+        != has_longitude
+    ):
+        parser.error(
+            "--lat と --lon は"
+            "必ず両方指定してください"
+        )
 
     if args.max_pages < 1:
         parser.error(
@@ -279,6 +332,68 @@ def convert_hotpepper_shop(
         ),
         "source": "Hot Pepper",
     }
+
+
+def resolve_seed_center(
+    args,
+):
+    location = str(
+        args.location
+        or ""
+    ).strip()
+
+    if location:
+
+        coordinates = (
+            g.get_yahoo_location_coordinates(
+                location
+            )
+        )
+
+        if not coordinates:
+            raise RuntimeError(
+                "Yahoo!で検索中心座標を"
+                f"取得できませんでした: {location}"
+            )
+
+        latitude, longitude = (
+            coordinates
+        )
+
+        area = str(
+            args.area
+            or location
+        ).strip()
+
+        return (
+            area,
+            float(latitude),
+            float(longitude),
+            "Yahoo! location",
+        )
+
+    latitude = float(
+        args.latitude
+    )
+
+    longitude = float(
+        args.longitude
+    )
+
+    area = str(
+        args.area
+        or (
+            f"{latitude},"
+            f"{longitude}"
+        )
+    ).strip()
+
+    return (
+        area,
+        latitude,
+        longitude,
+        "direct coordinates",
+    )
 
 
 def get_table_counts(
@@ -898,6 +1013,15 @@ def apply_seed(
 def main():
     args = parse_args()
 
+    (
+        area,
+        latitude,
+        longitude,
+        coordinate_source,
+    ) = resolve_seed_center(
+        args
+    )
+
     print(
         "========================================"
     )
@@ -913,13 +1037,26 @@ def main():
 
     print(
         "Area:",
-        args.area,
+        area,
+    )
+
+    print(
+        "Location input:",
+        (
+            args.location
+            or "(direct coordinates)"
+        ),
+    )
+
+    print(
+        "Coordinate source:",
+        coordinate_source,
     )
 
     print(
         "Center:",
-        args.latitude,
-        args.longitude,
+        latitude,
+        longitude,
     )
 
     print(
@@ -960,8 +1097,8 @@ def main():
         unique_results,
         accepted_by_term,
     ) = search_seed_candidates(
-        args.latitude,
-        args.longitude,
+        latitude,
+        longitude,
         args.range_value,
         args.max_pages,
     )
