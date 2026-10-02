@@ -90,6 +90,15 @@ def parse_args():
     )
 
     scope.add_argument(
+        "--prefecture-code",
+        help=(
+            "Hot Pepper large_areaコードで"
+            "都道府県を指定する。"
+            "例: 東京=Z011"
+        ),
+    )
+
+    scope.add_argument(
         "--nationwide",
         action="store_true",
         help="47都道府県すべてを対象にする",
@@ -447,6 +456,41 @@ def select_target_areas(
             raise RuntimeError(
                 "Prefecture not found: "
                 f"{prefecture}"
+            )
+
+    elif args.prefecture_code:
+        prefecture_code = (
+            str(
+                args.prefecture_code
+            )
+            .strip()
+            .upper()
+        )
+
+        selected = [
+            item
+            for item in all_areas
+            if (
+                str(
+                    (
+                        item.get(
+                            "large_area",
+                            {},
+                        )
+                        or {}
+                    ).get(
+                        "code",
+                        "",
+                    )
+                ).upper()
+                == prefecture_code
+            )
+        ]
+
+        if not selected:
+            raise RuntimeError(
+                "Prefecture code not found: "
+                f"{prefecture_code}"
             )
 
     else:
