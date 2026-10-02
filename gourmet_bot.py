@@ -7513,42 +7513,45 @@ def format_current_location_line_answer(
             or ""
         ).strip()
 
-        if free_drink:
-            if (
-                "あり" in free_drink
-                or "有" in free_drink
-            ):
-                features.append(
-                    "飲み放題あり"
-                )
+        if (
+            normalize_hotpepper_yes_no(
+                free_drink
+            )
+            is True
+        ):
+            features.append(
+                "飲み放題あり"
+            )
 
-        if private_room:
-            if (
-                "あり" in private_room
-                or "有" in private_room
-            ):
-                features.append(
-                    "個室あり"
-                )
+        if (
+            normalize_hotpepper_yes_no(
+                private_room
+            )
+            is True
+        ):
+            features.append(
+                "個室あり"
+            )
 
-        if karaoke:
-            if (
-                "あり" in karaoke
-                or "有" in karaoke
-            ):
-                features.append(
-                    "カラオケあり"
-                )
+        if (
+            normalize_hotpepper_yes_no(
+                karaoke
+            )
+            is True
+        ):
+            features.append(
+                "カラオケあり"
+            )
 
-        if midnight:
-            if (
-                "営業している" in midnight
-                or "あり" in midnight
-                or "有" in midnight
-            ):
-                features.append(
-                    "深夜営業"
-                )
+        if (
+            normalize_hotpepper_midnight(
+                midnight
+            )
+            is True
+        ):
+            features.append(
+                "深夜営業"
+            )
 
         # 重複除去しつつ順序保持
         feature_seen = set()
