@@ -1090,7 +1090,7 @@ def apply_area(
             "Area marked complete."
         )
 
-        return
+        return True
 
     total_chunks = (
         (
@@ -1509,7 +1509,7 @@ def main():
                 )
             )
 
-            if not area_complete:
+            if area_complete is False:
                 stopped_by_chunk_limit = True
 
         processed_areas += 1
