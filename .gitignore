@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .env
 backup/
+/data/gourmet_seed_checkpoint.json
