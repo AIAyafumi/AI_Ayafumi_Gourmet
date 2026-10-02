@@ -2791,6 +2791,7 @@ def is_second_party_genre_match(
 
             strong_bar_genres = [
                 "ダイニングバー",
+                "バー・カクテル",
                 "ショットバー",
                 "ワインバー",
                 "スポーツバー",
@@ -3590,6 +3591,7 @@ def get_neon_gourmet_venue_features(
 
 def enrich_shops_with_neon_venue_features(
     shops,
+    conn=None,
 ):
     """
     店舗候補の空欄属性だけ、
@@ -3606,7 +3608,8 @@ def enrich_shops_with_neon_venue_features(
 
         info = (
             get_neon_gourmet_venue_features(
-                item
+                item,
+                conn=conn,
             )
         )
 
@@ -4144,6 +4147,7 @@ def get_neon_gourmet_smoking_info(
 
 def enrich_shops_with_neon_smoking_info(
     shops,
+    conn=None,
 ):
     """
     喫煙情報が無い候補だけ、
@@ -4173,7 +4177,8 @@ def enrich_shops_with_neon_smoking_info(
 
         info = (
             get_neon_gourmet_smoking_info(
-                item
+                item,
+                conn=conn,
             )
         )
 
@@ -4514,25 +4519,45 @@ def search_current_location_second_party(
     # 営業時間・喫煙情報・店舗属性をNeonへ蓄積する。
     # 喫煙情報以外の店舗属性は
     # 現段階では候補選定には使用しない。
-    for shop in hotpepper_results:
-        try:
-            save_hotpepper_business_hours(
-                shop
-            )
+    neon_write_conn = (
+        _get_gourmet_neon_connection()
+    )
 
-            save_hotpepper_smoking_info(
-                shop
-            )
-
-            save_hotpepper_venue_features(
-                shop
-            )
-        except Exception as e:
+    try:
+        if neon_write_conn is None:
             print(
-                "店舗属性自動保存エラー"
-                "（検索継続）:",
-                e,
+                "店舗属性DB一括保存省略"
+                "（Neon接続なし）"
             )
+
+        else:
+            for shop in hotpepper_results:
+                try:
+                    save_hotpepper_business_hours(
+                        shop,
+                        conn=neon_write_conn,
+                    )
+
+                    save_hotpepper_smoking_info(
+                        shop,
+                        conn=neon_write_conn,
+                    )
+
+                    save_hotpepper_venue_features(
+                        shop,
+                        conn=neon_write_conn,
+                    )
+
+                except Exception as e:
+                    print(
+                        "店舗属性自動保存エラー"
+                        "（検索継続）:",
+                        e,
+                    )
+
+    finally:
+        if neon_write_conn is not None:
+            neon_write_conn.close()
 
     yahoo_results = (
         deduplicate_gourmet_shops(
@@ -4567,41 +4592,53 @@ def search_current_location_second_party(
         )
     )
 
-    merged_results = (
-        enrich_shops_with_neon_smoking_info(
-            merged_results
-        )
+    neon_read_conn = (
+        _get_gourmet_neon_connection()
     )
 
-    merged_results = (
-        enrich_shops_with_neon_venue_features(
-            merged_results
+    try:
+        merged_results = (
+            enrich_shops_with_neon_smoking_info(
+                merged_results,
+                conn=neon_read_conn,
+            )
         )
-    )
 
-    merged_results = (
-        prioritize_smoking_candidates(
-            merged_results,
-            state.get(
-                "smoking",
-                "どちらでも",
-            ),
-            limit=GOURMET_CANDIDATE_POOL_LIMIT,
+        merged_results = (
+            enrich_shops_with_neon_venue_features(
+                merged_results,
+                conn=neon_read_conn,
+            )
         )
-    )
 
-    merged_results = (
-        select_gourmet_candidate_pool(
-            merged_results,
-            limit=GOURMET_CANDIDATE_POOL_LIMIT,
+        merged_results = (
+            prioritize_smoking_candidates(
+                merged_results,
+                state.get(
+                    "smoking",
+                    "どちらでも",
+                ),
+                limit=GOURMET_CANDIDATE_POOL_LIMIT,
+            )
         )
-    )
 
-    merged_results = (
-        verify_shops_with_tavily(
-            merged_results
+        merged_results = (
+            select_gourmet_candidate_pool(
+                merged_results,
+                limit=GOURMET_CANDIDATE_POOL_LIMIT,
+            )
         )
-    )
+
+        merged_results = (
+            verify_shops_with_tavily(
+                merged_results,
+                conn=neon_read_conn,
+            )
+        )
+
+    finally:
+        if neon_read_conn is not None:
+            neon_read_conn.close()
 
     def distance_key(shop):
 
@@ -5977,6 +6014,8 @@ def check_shop_with_tavily(shop):
 
 def verify_shops_with_tavily(
     shops,
+    conn=None,
+    now=None,
 ):
     verified = []
 
@@ -6066,7 +6105,8 @@ def verify_shops_with_tavily(
 
                 neon_verification = (
                     get_neon_gourmet_status_cache(
-                        shop
+                        shop,
+                        conn=conn,
                     )
                 )
 
@@ -6115,7 +6155,9 @@ def verify_shops_with_tavily(
 
             hours_verification = (
                 get_neon_gourmet_business_hours_status(
-                    shop
+                    shop,
+                    now=now,
+                    conn=conn,
                 )
             )
 
@@ -6170,6 +6212,7 @@ def verify_shops_with_tavily(
             save_neon_gourmet_status_cache(
                 shop,
                 verification,
+                conn=conn,
             )
 
         status = str(
